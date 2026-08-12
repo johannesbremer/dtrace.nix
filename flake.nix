@@ -4,6 +4,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+    nixos-lima = {
+      url = "github:nixos-lima/nixos-lima/master";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     dtrace-src = {
       url = "github:oracle/dtrace/55ebd5f81bf2e10142585a3a43536a99f5f9b0d4";
       flake = false;
@@ -14,6 +19,7 @@
     inputs@{
       self,
       nixpkgs,
+      nixos-lima,
       dtrace-src,
       ...
     }:
@@ -48,11 +54,33 @@
         {
           default = pkgs.oracle-dtrace;
           inherit (pkgs) oracle-dtrace dtrace-bpf-binutils dtrace-bpf-gcc;
+          upstream-test = import ./nix/tests/direct.nix {
+            inherit pkgs;
+            dtracePackage = pkgs.oracle-dtrace;
+          };
         }
       );
 
+      apps = forAllSystems (system: {
+        upstream-test = {
+          type = "app";
+          program = "${self.packages.${system}.upstream-test}/bin/dtrace-upstream-test";
+          meta.description = "Run Oracle DTrace's upstream Linux test suite";
+        };
+      });
+
       nixosModules.default = import ./nix/module.nix { inherit self; };
       nixosModules.dtrace = self.nixosModules.default;
+
+      nixosConfigurations.dtrace-lima-x86 = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = { inherit self; };
+        modules = [
+          nixos-lima.nixosModules.lima
+          self.nixosModules.default
+          ./nix/hosts/lima-x86.nix
+        ];
+      };
 
       checks = forAllSystems (
         system:
