@@ -4,13 +4,7 @@ DTrace, declared.
 
 A NixOS module that brings Oracle DTrace to your system — the BPF toolchain,
 the `dtrace` binary, CUSE integration, the group, and the permissions — all
-wired up through one option.
-
-```nix
-programs.dtrace.enable = true;
-```
-
-That's it. Reboot, and `sudo dtrace -l` works.
+wired up through one flake.
 
 ---
 
@@ -63,24 +57,3 @@ Commands started with `dtrace -c` run as the calling user, not as root.
 
 No Oracle Linux packages, UEK kernel, or out-of-tree kernel patch are used.
 The flake supports `x86_64-linux` and `aarch64-linux`.
-
-## Build and test
-
-```console
-$ nix build .#oracle-dtrace
-$ nix flake check
-```
-
-The integration check boots NixOS and exercises root and group-authorized
-tracing, a real `openat` syscall, and a compiled USDT probe. The upstream check
-runs Oracle's installed regression harness across its `unittest`, `internals`,
-`stress`, `demo`, and `smoke` suites in upstream's quick mode. This excludes
-only cases annotated to run longer than Oracle's default 41-second timeout.
-Both VM tests can fall back to QEMU TCG, which makes them runnable from Linux
-VMs on macOS when KVM is unavailable.
-
-The package carries a small compatibility patch for upstream's variable-length
-USDT parser messages. It preserves the parser's seccomp confinement while
-making the code work with Nixpkgs' `_FORTIFY_SOURCE=3` hardening.
-
-Oracle DTrace is licensed under the Universal Permissive License 1.0.
