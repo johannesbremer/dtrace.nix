@@ -26,6 +26,12 @@ stdenv.mkDerivation (finalAttrs: {
   version = "2.0.7-4";
   inherit src;
 
+  outputs = [
+    "out"
+    "testsuite"
+  ];
+  setOutputFlags = false;
+
   patches = [ ./patches/fix-fortify-usdt-parser.patch ];
 
   nativeBuildInputs = [
@@ -56,6 +62,7 @@ stdenv.mkDerivation (finalAttrs: {
     "--includedir=${placeholder "out"}/include"
     "--mandir=${placeholder "out"}/share/man"
     "--docdir=${placeholder "out"}/share/doc/dtrace"
+    "--testdir=${placeholder "testsuite"}/share/dtrace/testsuite"
     "--pkg-config-dir=${placeholder "out"}/lib/pkgconfig"
     "--udevdir=${placeholder "out"}/lib/udev/rules.d"
     "--without-systemd"
@@ -72,7 +79,7 @@ stdenv.mkDerivation (finalAttrs: {
   makeFlags = [ "SHELL=${bash}/bin/bash" ];
 
   postPatch = ''
-    patchShebangs configure include libdtrace libproc
+    patchShebangs configure include libdtrace libproc test runtest.sh
     substituteInPlace GNUmakefile \
       --replace-fail 'SHELL = /bin/bash' 'SHELL = ${bash}/bin/bash'
     substituteInPlace include/Build \
@@ -82,6 +89,12 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail '-x c - >/dev/null' '-x c - -lc >/dev/null'
     substituteInPlace cmd/Build \
       --replace-fail '#!/bin/bash' '#!${bash}/bin/bash'
+    substituteInPlace cmd/dtrace.c \
+      --replace-fail \
+        'if (getuid() != 0 && (g_mode == DMODE_LIST || g_mode == DMODE_EXEC)) {' \
+        'if (geteuid() != 0 && (g_mode == DMODE_LIST || g_mode == DMODE_EXEC)) {'
+    substituteInPlace runtest.sh \
+      --replace-fail /usr/bin/cpp ${stdenv.cc}/bin/cpp
     substituteInPlace libdtrace/dt_open.c \
       --replace-fail \
         'static const char *_dtrace_defld = "ld";' \
@@ -94,7 +107,13 @@ stdenv.mkDerivation (finalAttrs: {
 
   enableParallelBuilding = true;
 
+  installTargets = [
+    "install"
+    "install-test"
+  ];
+
   postInstall = ''
+    rm -f "$out/lib/udev/rules.d/60-dtprobed.rules"
     rm -f "$out/lib/systemd/system/dtprobed.service"
     rm -f "$out/lib/systemd/system/dtrace-usdt.target"
     rm -rf "$out/lib/systemd/system-preset"
