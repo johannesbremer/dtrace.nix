@@ -1,0 +1,144 @@
+From: NixOS DTrace maintainers
+Subject: libcommon: address trailing message storage through allocation base
+
+The parser protocol uses one-byte trailing arrays as variable-sized message
+payloads.  With _FORTIFY_SOURCE=3, glibc sees each declared member as one byte
+and aborts writes of longer provider, probe, argument, or error data, even
+though each message was allocated with enough trailing storage.
+
+Address payloads through the allocation base and their protocol offsets.  This
+retains the protocol layout and bounds checking against the complete dynamic
+allocation while avoiding the misleading one-byte subobject bound.
+
+diff --git a/libcommon/usdt_parser.c b/libcommon/usdt_parser.c
+index 8641980..b490740 100644
+--- a/libcommon/usdt_parser.c
++++ b/libcommon/usdt_parser.c
+@@ -50,7 +50,8 @@ usdt_error(int out, int err_no, const char *fmt, ...)
+ 	parsed->size = sz;
+ 	parsed->type = DIT_ERR;
+ 	parsed->err.err_no = err_no;
+-	strcpy(parsed->err.err, msg);
++	memcpy((char *)parsed + offsetof(dof_parsed_t, err.err), msg,
++	       strlen(msg) + 1);
+ 
+ 	usdt_parser_write_one(out, parsed, parsed->size);
+ 	free(parsed);
+diff --git a/libcommon/usdt_parser_dof.c b/libcommon/usdt_parser_dof.c
+index bc8e185..147fafb 100644
+--- a/libcommon/usdt_parser_dof.c
++++ b/libcommon/usdt_parser_dof.c
+@@ -765,7 +765,8 @@ emit_probe(int out, dtrace_helper_probedesc_t *dhpb)
+ 	msg->probe.nargc = dhpb->dthpb_nargc;
+ 	msg->probe.xargc = dhpb->dthpb_xargc;
+ 
+-	ptr = stpcpy(msg->probe.name, dhpb->dthpb_mod);
++	ptr = (char *)msg + offsetof(dof_parsed_t, probe.name);
++	ptr = stpcpy(ptr, dhpb->dthpb_mod);
+ 	ptr++;
+ 	ptr = stpcpy(ptr, dhpb->dthpb_func);
+ 	ptr++;
+@@ -796,7 +797,8 @@ emit_probe(int out, dtrace_helper_probedesc_t *dhpb)
+ 
+ 		msg->size = msg_size;
+ 		msg->type = DIT_ARGS_NATIVE;
+-		memcpy(msg->nargs.args, dhpb->dthpb_ntypes, nargs_size);
++		memcpy((char *)msg + offsetof(dof_parsed_t, nargs.args),
++		       dhpb->dthpb_ntypes, nargs_size);
+ 		usdt_parser_write_one(out, msg, msg_size);
+ 
+ 		free(msg);
+@@ -819,7 +821,8 @@ emit_probe(int out, dtrace_helper_probedesc_t *dhpb)
+ 
+ 			msg->size = msg_size;
+ 			msg->type = DIT_ARGS_XLAT;
+-			memcpy(msg->xargs.args, dhpb->dthpb_xtypes, xargs_size);
++			memcpy((char *)msg + offsetof(dof_parsed_t, xargs.args),
++			       dhpb->dthpb_xtypes, xargs_size);
+ 			usdt_parser_write_one(out, msg, msg_size);
+ 
+ 			free(msg);
+@@ -838,7 +841,8 @@ emit_probe(int out, dtrace_helper_probedesc_t *dhpb)
+ 
+ 			msg->size = msg_size;
+ 			msg->type = DIT_ARGS_MAP;
+-			memcpy(msg->argmap.argmap, dhpb->dthpb_args, map_size);
++			memcpy((char *)msg + offsetof(dof_parsed_t, argmap.argmap),
++			       dhpb->dthpb_args, map_size);
+ 			usdt_parser_write_one(out, msg, msg_size);
+ 			free(msg);
+ 		}
+@@ -935,7 +939,8 @@ emit_provider(int out, dof_helper_t *dhp,
+ 	provider_msg->size = provider_msg_size;
+ 	provider_msg->type = DIT_PROVIDER;
+ 	provider_msg->provider.nprobes = prb_sec->dofs_size / prb_sec->dofs_entsize;
+-	strcpy(provider_msg->provider.name, dhpb.dthpb_prov);
++	memcpy((char *)provider_msg + offsetof(dof_parsed_t, provider.name),
++	       dhpb.dthpb_prov, strlen(dhpb.dthpb_prov) + 1);
+ 	usdt_parser_write_one(out, provider_msg, provider_msg_size);
+ 
+ 	/*
+diff --git a/libcommon/usdt_parser_notes.c b/libcommon/usdt_parser_notes.c
+index c98c9fb..b611054 100644
+--- a/libcommon/usdt_parser_notes.c
++++ b/libcommon/usdt_parser_notes.c
+@@ -583,7 +583,8 @@ emit_tp(int out, const dof_helper_t *dhp, const dt_probe_t *prp)
+ 
+ 	msg->tracepoint.addr = prp->off + dhp->dofhp_addr;
+ 	msg->tracepoint.is_enabled = prp->is_enabled;
+-	strcpy(msg->tracepoint.args, prp->sargs);
++	memcpy((char *)msg + offsetof(dof_parsed_t, tracepoint.args),
++	       prp->sargs, strlen(prp->sargs) + 1);
+ 
+ 	usdt_parser_write_one(out, msg, msg->size);
+ 
+@@ -611,7 +612,8 @@ emit_probe(int out, const dof_helper_t *dhp, const dt_probe_t *prp)
+ 	msg->probe.nargc = prp->nargc;
+ 	msg->probe.xargc = prp->xargc;
+ 
+-	p = stpcpy(msg->probe.name, prp->mod);
++	p = (char *)msg + offsetof(dof_parsed_t, probe.name);
++	p = stpcpy(p, prp->mod);
+ 	p++;
+ 	p = stpcpy(p, prp->fun);
+ 	p++;
+@@ -629,7 +631,8 @@ emit_probe(int out, const dof_helper_t *dhp, const dt_probe_t *prp)
+ 		if ((msg = alloc_msg(out, DIT_ARGS_NATIVE, prp->nargsz)) == NULL)
+ 			return -1;
+ 
+-		memcpy(msg->nargs.args, prp->nargs, prp->nargsz);
++		memcpy((char *)msg + offsetof(dof_parsed_t, nargs.args),
++		       prp->nargs, prp->nargsz);
+ 
+ 		usdt_parser_write_one(out, msg, msg->size);
+ 
+@@ -641,7 +644,8 @@ emit_probe(int out, const dof_helper_t *dhp, const dt_probe_t *prp)
+ 			if ((msg = alloc_msg(out, DIT_ARGS_XLAT, prp->xargsz)) == NULL)
+ 				return -1;
+ 	
+-			memcpy(msg->xargs.args, prp->xargs, prp->xargsz);
++			memcpy((char *)msg + offsetof(dof_parsed_t, xargs.args),
++			       prp->xargs, prp->xargsz);
+ 	
+ 			usdt_parser_write_one(out, msg, msg->size);
+ 	
+@@ -650,7 +654,8 @@ emit_probe(int out, const dof_helper_t *dhp, const dt_probe_t *prp)
+ 			if ((msg = alloc_msg(out, DIT_ARGS_MAP, mapsz)) == NULL)
+ 				return -1;
+ 	
+-			memcpy(msg->argmap.argmap, prp->xmap, mapsz);
++			memcpy((char *)msg + offsetof(dof_parsed_t, argmap.argmap),
++			       prp->xmap, mapsz);
+ 	
+ 			usdt_parser_write_one(out, msg, msg->size);
+ 	
+@@ -678,7 +683,8 @@ emit_provider(int out, const dof_helper_t *dhp, const dt_provider_t *pvp)
+ 	if ((msg = alloc_msg(out, DIT_PROVIDER, strlen(pvp->name) + 1)) == NULL)
+ 		return -1;
+ 
+-	strcpy(msg->provider.name, pvp->name);
++	memcpy((char *)msg + offsetof(dof_parsed_t, provider.name),
++	       pvp->name, strlen(pvp->name) + 1);
+ 	msg->provider.nprobes = pvp->probec;
+ 
+ 	usdt_parser_write_one(out, msg, msg->size);

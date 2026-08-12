@@ -1,0 +1,43 @@
+{
+  "nodes": {
+    "dtrace-src": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-z1JJaWx5I6+vVwUBAd4nQGEgFMGSmpzHqRFhclaPFUo=",
+        "owner": "oracle",
+        "repo": "dtrace",
+        "rev": "55ebd5f81bf2e10142585a3a43536a99f5f9b0d4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oracle",
+        "repo": "dtrace",
+        "rev": "55ebd5f81bf2e10142585a3a43536a99f5f9b0d4",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "narHash": "sha256-RzPPiWeUtuvymnpuEWsdtzli5w4kjZs49FqEs3/1u+I=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "2fcb964de67fcf60b43471c55d5d99e61a9ccb5a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "dtrace-src": "dtrace-src",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
