@@ -32,7 +32,10 @@ stdenv.mkDerivation (finalAttrs: {
   ];
   setOutputFlags = false;
 
-  patches = [ ./patches/fix-fortify-usdt-parser.patch ];
+  patches = [
+    ./patches/fix-fortify-usdt-parser.patch
+    ./patches/fix-linux-6.19-syscall-args.patch
+  ];
 
   nativeBuildInputs = [
     bison

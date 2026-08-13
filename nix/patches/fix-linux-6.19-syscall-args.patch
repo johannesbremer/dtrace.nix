@@ -1,0 +1,293 @@
+From 85eb44a36d85526cb9c9b570103a5551cce583a0 Mon Sep 17 00:00:00 2001
+From: Kris Van Hees <kris.van.hees@oracle.com>
+Date: Thu, 29 Jan 2026 22:29:36 -0500
+Subject: [PATCH] syscall: fix syscall probe argument handling
+
+Kernel commit a544d9a66bdf
+("tracing: Have syscall trace events read user space string") (added in
+6.19-rc1) causes special fields to be added to the tracepoint format
+file for data strings that are faulted in.  We need to account for this
+when determining the number of arguments for syscall tracepoints.
+
+We introduce support for a valid_arg() callback function that providers
+can implement to support skipping initial non-common fields and also to
+stop processing fields as arguments.  The syscall provider uses this to
+skip the __syscall_nr field, and to stop argument processing when the
+first dynamic string field is found.
+
+Upstream: https://github.com/oracle/dtrace/commit/85eb44a36d85526cb9c9b570103a5551cce583a0
+Signed-off-by: Kris Van Hees <kris.van.hees@oracle.com>
+Reviewed-by: Eugene Loh <eugene.loh@oracle.com>
+---
+ libdtrace/dt_prov_dtrace.c  |  2 +-
+ libdtrace/dt_prov_fbt.c     |  2 +-
+ libdtrace/dt_prov_sdt.c     |  2 +-
+ libdtrace/dt_prov_syscall.c | 42 +++++++++++++++++++++---
+ libdtrace/dt_provider_tp.c  | 63 ++++++++++++++++++++++++-------------
+ libdtrace/dt_provider_tp.h  | 11 +++++--
+ 6 files changed, 89 insertions(+), 33 deletions(-)
+
+diff --git a/libdtrace/dt_prov_dtrace.c b/libdtrace/dt_prov_dtrace.c
+index 9ef001a3..4b788507 100644
+--- a/libdtrace/dt_prov_dtrace.c
++++ b/libdtrace/dt_prov_dtrace.c
+@@ -255,7 +255,7 @@ static int attach(dtrace_hdl_t *dtp, const dt_probe_t *prp, int bpf_fd)
+ 		if (f == NULL)
+ 			return -ENOENT;
+ 
+-		rc = dt_tp_probe_info(dtp, f, 0, prp, NULL, NULL);
++		rc = dt_tp_probe_info(dtp, f, NULL, prp, NULL, NULL);
+ 		fclose(f);
+ 
+ 		if (rc < 0)
+diff --git a/libdtrace/dt_prov_fbt.c b/libdtrace/dt_prov_fbt.c
+index ed1bd93d..59e4583b 100644
+--- a/libdtrace/dt_prov_fbt.c
++++ b/libdtrace/dt_prov_fbt.c
+@@ -526,7 +526,7 @@ static int kprobe_attach(dtrace_hdl_t *dtp, const dt_probe_t *prp, int bpf_fd)
+ 			goto out;
+ 
+ 		/* read event id from format file */
+-		rc = dt_tp_probe_info(dtp, f, 0, prp, NULL, NULL);
++		rc = dt_tp_probe_info(dtp, f, NULL, prp, NULL, NULL);
+ 		fclose(f);
+ 
+ 		if (rc < 0)
+diff --git a/libdtrace/dt_prov_sdt.c b/libdtrace/dt_prov_sdt.c
+index f9de2cf8..20c83965 100644
+--- a/libdtrace/dt_prov_sdt.c
++++ b/libdtrace/dt_prov_sdt.c
+@@ -202,7 +202,7 @@ static int probe_info_tracefs(dtrace_hdl_t *dtp, const dt_probe_t *prp,
+ 	if (!f)
+ 		return -ENOENT;
+ 
+-	rc = dt_tp_probe_info(dtp, f, 0, prp, argcp, argvp);
++	rc = dt_tp_probe_info(dtp, f, NULL, prp, argcp, argvp);
+ 	fclose(f);
+ 
+ 	return rc;
+diff --git a/libdtrace/dt_prov_syscall.c b/libdtrace/dt_prov_syscall.c
+index 4f1e206a..e37ce397 100644
+--- a/libdtrace/dt_prov_syscall.c
++++ b/libdtrace/dt_prov_syscall.c
+@@ -40,11 +40,6 @@ static const char		modname[] = "vmlinux";
+ 
+ #define SYSCALLSFS		EVENTSFS "syscalls/"
+ 
+-/*
+- * We need to skip over an extra field: __syscall_nr.
+- */
+-#define SKIP_EXTRA_FIELDS	1
+-
+ static const dtrace_pattr_t	pattr = {
+ { DTRACE_STABILITY_EVOLVING, DTRACE_STABILITY_EVOLVING, DTRACE_CLASS_COMMON },
+ { DTRACE_STABILITY_PRIVATE, DTRACE_STABILITY_PRIVATE, DTRACE_CLASS_UNKNOWN },
+@@ -186,6 +181,41 @@ static int trampoline(dt_pcb_t *pcb, uint_t exitlbl)
+ 	return 0;
+ }
+ 
++static int valid_arg(int fldc, const char *desc)
++{
++	char	*p, *q;
++	int	rc = 1;
++	size_t	l;
++
++	/* Skip the first non-common field. */
++	if (fldc < 1)
++		return 0;
++
++	/*
++	 * A non-common field with a __data_loc tag and __<name>_val name
++	 * indicates the beginning of the dynamic data area.  The previously
++	 * processed field was the last argument.
++	 */
++	p = strdup(desc);
++	if (sscanf(p, "__data_loc %[^;]", p) <= 0)
++		goto ok;
++
++	l = strlen(p);
++	if (l < 4 || strcmp(&(p[l - 4]), "_val") != 0)
++		goto ok;
++
++	q = strrchr(p, ' ');
++	if (q == NULL || strncmp(q, " __", 3) != 0)
++		goto ok;
++
++	/* Done with processing fields. */
++	rc = -1;
++
++ok:
++	free(p);
++	return rc;
++}
++
+ static int probe_info(dtrace_hdl_t *dtp, const dt_probe_t *prp,
+ 		      int *argcp, dt_argdesc_t **argvp)
+ {
+@@ -209,7 +239,7 @@ static int probe_info(dtrace_hdl_t *dtp, const dt_probe_t *prp,
+ 	if (!f)
+ 		return -ENOENT;
+ 
+-	rc = dt_tp_probe_info(dtp, f, SKIP_EXTRA_FIELDS, prp, argcp, argvp);
++	rc = dt_tp_probe_info(dtp, f, valid_arg, prp, argcp, argvp);
+ 	fclose(f);
+ 
+ 	return rc;
+diff --git a/libdtrace/dt_provider_tp.c b/libdtrace/dt_provider_tp.c
+index 1faf5cd4..564cb66c 100644
+--- a/libdtrace/dt_provider_tp.c
++++ b/libdtrace/dt_provider_tp.c
+@@ -123,17 +123,16 @@ dt_tp_attach_raw(dtrace_hdl_t *dtp, tp_probe_t *tpp, const char *name,
+  * array dimension specifiers (and those are part of the type).
+  *
+  * All events include a number of common fields that we are not interested
+- * in and that need to be skipped.  Callers of this function can specify an
+- * additional number of fields to skip (using the 'skip' parameter) before
+- * we get to the actual arguments.
++ * in and that need to be skipped.  Callers of this function can specify a
++ * callback function (valid_arg) to validate a non-common field.
+  */
+ int
+-dt_tp_event_info(dtrace_hdl_t *dtp, FILE *f, int skip, tp_probe_t *tpp,
+-		 int *argcp, dt_argdesc_t **argvp)
++dt_tp_event_info(dtrace_hdl_t *dtp, FILE *f, dt_valid_arg_f *valid_arg,
++		 tp_probe_t *tpp, int *argcp, dt_argdesc_t **argvp)
+ {
+ 	char		*buf = NULL;
+ 	size_t		bufsz;
+-	int		argc, common = 1;
++	int		idx = 0, argc = 0, skip = 0, common = 1;
+ 	dt_argdesc_t	*argv = NULL;
+ 
+ 	tpp->id = 0;
+@@ -141,10 +140,8 @@ dt_tp_event_info(dtrace_hdl_t *dtp, FILE *f, int skip, tp_probe_t *tpp,
+ 	/*
+ 	 * Pass 1:
+ 	 * Determine the event id and the number of arguments.
+-	 * Skip over how ever many arguments the caller asks us to skip.
+-	 * We will skip initial "common fields" as well.
++	 * We will skip initial "common fields".
+ 	 */
+-	argc = -skip;
+ 	while (getline(&buf, &bufsz, f) >= 0) {
+ 		char	*p = buf;
+ 
+@@ -205,7 +202,31 @@ dt_tp_event_info(dtrace_hdl_t *dtp, FILE *f, int skip, tp_probe_t *tpp,
+ 			common = 0;
+ 		}
+ 
+-		/* We found a non-common "field:" description. */
++		/*
++		 * We found a non-common "field:" description.
++		 *
++		 * If the caller provided a validation hook, call it with the
++		 * current non-common field counter and the description text.
++		 * The hook returns
++		 *  -1 if the field is not a valid argument, and no additional
++		 *       arguments can follow
++		 *   0 if the field should be skipped
++		 *   1 if the field is a valid argument
++		 */
++		idx++;
++		if (valid_arg != NULL) {
++			int	rc = valid_arg(idx - 1, p);
++
++			if (rc == -1)
++				break;
++			if (rc == 0) {
++				skip++;
++				continue;
++			}
++		}
++
++		sscanf(p, "__data_loc %[^;]", p);
++
+ 		argc++;
+ 	}
+ 	free(buf);
+@@ -232,7 +253,7 @@ dt_tp_event_info(dtrace_hdl_t *dtp, FILE *f, int skip, tp_probe_t *tpp,
+ 	 * Fill in the actual argument datatype strings.
+ 	 */
+ 	rewind(f);
+-	argc = -skip;
++	idx = -skip;
+ 	while (getline(&buf, &bufsz, f) >= 0) {
+ 		char	*p;
+ 		size_t	l;
+@@ -249,7 +270,7 @@ dt_tp_event_info(dtrace_hdl_t *dtp, FILE *f, int skip, tp_probe_t *tpp,
+ 			continue;
+ 
+ 		/* We found a field: description - see if we should skip it. */
+-		if (argc < 0)
++		if (idx < 0)
+ 			goto skip;
+ 
+ 		sscanf(p, "__data_loc %[^;]", p);
+@@ -320,13 +341,15 @@ dt_tp_event_info(dtrace_hdl_t *dtp, FILE *f, int skip, tp_probe_t *tpp,
+ 			}
+ 		}
+ 
+-		argv[argc].mapping = argc;
+-		argv[argc].flags = 0;
+-		argv[argc].native = strdup(strp);
+-		argv[argc].xlate = NULL;
++		argv[idx].mapping = idx;
++		argv[idx].flags = 0;
++		argv[idx].native = strdup(strp);
++		argv[idx].xlate = NULL;
+ 
+ skip:
+-		argc++;
++		idx++;
++		if (idx == argc)
++			break;
+ 	}
+ 
+ done:
+@@ -413,12 +436,12 @@ dt_tp_probe_insert(dtrace_hdl_t *dtp, dt_provider_t *prov, const char *prv,
+  * the argument types for a given probe.
+  */
+ int
+-dt_tp_probe_info(dtrace_hdl_t *dtp, FILE *f, int skip, const dt_probe_t *prp,
+-		 int *argcp, dt_argdesc_t **argvp)
++dt_tp_probe_info(dtrace_hdl_t *dtp, FILE *f, dt_valid_arg_f *valid_arg,
++		 const dt_probe_t *prp, int *argcp, dt_argdesc_t **argvp)
+ {
+ 	tp_probe_t	*tpp = prp->prv_data;
+ 
+-	return dt_tp_event_info(dtp, f, skip, tpp, argcp, argvp);
++	return dt_tp_event_info(dtp, f, valid_arg, tpp, argcp, argvp);
+ }
+ 
+ /*
+diff --git a/libdtrace/dt_provider_tp.h b/libdtrace/dt_provider_tp.h
+index 406609d1..02772cb6 100644
+--- a/libdtrace/dt_provider_tp.h
++++ b/libdtrace/dt_provider_tp.h
+@@ -33,8 +33,12 @@ extern int dt_tp_attach(dtrace_hdl_t *dtp, tp_probe_t *tpp, int bpf_fd);
+ extern int dt_tp_attach_raw(dtrace_hdl_t *dtp, tp_probe_t *tpp,
+ 			    const char *name, int bpf_fd);
+ extern int dt_tp_has_info(const tp_probe_t *tpp);
+-extern int dt_tp_event_info(dtrace_hdl_t *dtp, FILE *f, int skip,
+-			    tp_probe_t *tpp, int *argcp, dt_argdesc_t **argvp);
++
++typedef int dt_valid_arg_f(int fldc, const char *desc);
++extern int dt_tp_event_info(dtrace_hdl_t *dtp, FILE *f,
++			    dt_valid_arg_f *valid_arg, tp_probe_t *tpp,
++			    int *argcp, dt_argdesc_t **argvp);
++
+ extern void dt_tp_detach(dtrace_hdl_t *dtp, tp_probe_t *tpp);
+ extern void dt_tp_destroy(dtrace_hdl_t *dtp, tp_probe_t *tpp);
+ extern uint32_t dt_tp_get_id(const tp_probe_t *prp);
+@@ -44,7 +48,8 @@ extern struct dt_probe *dt_tp_probe_insert(dtrace_hdl_t *dtp,
+ 					   dt_provider_t *prov,
+ 					   const char *prv, const char *mod,
+ 					   const char *fun, const char *prb);
+-extern int dt_tp_probe_info(dtrace_hdl_t *dtp, FILE *f, int skip,
++extern int dt_tp_probe_info(dtrace_hdl_t *dtp, FILE *f,
++			    dt_valid_arg_f *valid_arg,
+ 			    const struct dt_probe *prp, int *argcp,
+ 			    dt_argdesc_t **argvp);
+ extern int dt_tp_probe_has_info(const struct dt_probe *prp);
+-- 
+2.51.0
