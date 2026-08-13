@@ -1,0 +1,45 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Linux (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          enable_kvm: true
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - name: Evaluate flake
+        run: nix flake check --no-build --all-systems
+      - name: Run module assertions
+        run: |
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build --no-link -L ".#checks.$system.vm"
+      - name: Run upstream Linux tests
+        run: |
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build --no-link -L ".#checks.$system.upstream"

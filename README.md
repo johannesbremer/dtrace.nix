@@ -14,7 +14,7 @@ Add it as a flake input:
 
 ```nix
 {
-  inputs.dtrace.url = "github:yourname/dtrace.nix";
+  inputs.dtrace.url = "github:johannesbremer/dtrace.nix";
 
   outputs = { self, nixpkgs, dtrace, ... }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {
