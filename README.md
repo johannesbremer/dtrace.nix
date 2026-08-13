@@ -21,7 +21,7 @@ Add it as a flake input:
 
   outputs = { self, nixpkgs, dtrace, ... }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
+      system = "aarch64-linux";
       modules = [
         dtrace.nixosModules.default
         { programs.dtrace.enable = true; }
