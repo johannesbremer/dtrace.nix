@@ -1,10 +1,21 @@
 name: Test
 
 on:
+  workflow_dispatch:
   pull_request:
+    paths:
+      - .github/workflows/test.yml
+      - flake.lock
+      - flake.nix
+      - nix/**
   push:
     branches:
       - main
+    paths:
+      - .github/workflows/test.yml
+      - flake.lock
+      - flake.nix
+      - nix/**
 
 permissions:
   contents: read

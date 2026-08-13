@@ -43,7 +43,6 @@ pkgs.writeShellApplication {
 
     if (( $# == 0 )); then
       set -- \
-        --quiet \
         --timeout=41 \
         --skip-longer=41 \
         --testsuites=unittest,internals,stress,demo,smoke
