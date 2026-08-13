@@ -29,6 +29,13 @@
         "x86_64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+      pkgsFor = forAllSystems (
+        system:
+        import nixpkgs {
+          inherit system;
+          overlays = [ self.overlays.default ];
+        }
+      );
     in
     {
       overlays.default = final: _prev: {
@@ -46,10 +53,7 @@
       packages = forAllSystems (
         system:
         let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ self.overlays.default ];
-          };
+          pkgs = pkgsFor.${system};
         in
         {
           default = pkgs.oracle-dtrace;
@@ -85,10 +89,7 @@
       checks = forAllSystems (
         system:
         let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ self.overlays.default ];
-          };
+          pkgs = pkgsFor.${system};
         in
         {
           package = pkgs.oracle-dtrace;

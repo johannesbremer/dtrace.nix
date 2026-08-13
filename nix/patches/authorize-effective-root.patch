@@ -1,0 +1,26 @@
+From: NixOS DTrace maintainers
+Subject: dtrace: authorize tracing using the effective user ID
+
+The NixOS module grants selected members of the dtrace group access through a
+group-restricted, setuid-root wrapper.  Such a process retains the caller's
+real user ID while acquiring an effective user ID of zero.  Checking the real
+ID therefore rejects tracing even though the operating system has already
+authorized and elevated the invocation.
+
+Use the effective ID for this frontend privilege check.  This makes the check
+honor the wrapper's security boundary; access to that wrapper remains limited
+to explicitly configured, fully trusted users.
+
+diff --git a/cmd/dtrace.c b/cmd/dtrace.c
+index a2d44f61..ba0f63ef 100644
+--- a/cmd/dtrace.c
++++ b/cmd/dtrace.c
+@@ -1044,7 +1044,7 @@ main(int argc, char **argv)
+ 	 * DMODE_EXEC with g_exec==0, since otherwise too many probes will
+ 	 * simply not be recognized, likely causing puzzling behavior.
+ 	 */
+-	if (getuid() != 0 && (g_mode == DMODE_LIST || g_mode == DMODE_EXEC)) {
++	if (geteuid() != 0 && (g_mode == DMODE_LIST || g_mode == DMODE_EXEC)) {
+ 		fprintf(stderr, "%s: run as root for tracing and listing probes\n", g_pname);
+ 		return E_USAGE;
+ 	}

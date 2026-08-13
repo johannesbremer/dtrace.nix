@@ -14,7 +14,10 @@ Add it as a flake input:
 
 ```nix
 {
-  inputs.dtrace.url = "github:johannesbremer/dtrace.nix";
+  inputs.dtrace = {
+    url = "github:johannesbremer/dtrace.nix";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   outputs = { self, nixpkgs, dtrace, ... }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {

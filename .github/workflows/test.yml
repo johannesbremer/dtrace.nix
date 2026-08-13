@@ -26,19 +26,21 @@ concurrency:
 
 jobs:
   test:
-    name: Linux (${{ matrix.runner }})
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        runner:
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
+        include:
+          - name: test flake on x86
+            runner: ubuntu-26.04
+          - name: test flake on arm
+            runner: ubuntu-26.04-arm
 
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
         with:
           enable_kvm: true

@@ -18,12 +18,11 @@
   linuxHeaders,
   systemdLibs,
   zlib,
-  testers,
 }:
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "oracle-dtrace";
-  version = "2.0.7-4";
+  version = "2.0.7";
   inherit src;
 
   outputs = [
@@ -35,6 +34,7 @@ stdenv.mkDerivation (finalAttrs: {
   patches = [
     ./patches/fix-fortify-usdt-parser.patch
     ./patches/fix-linux-6.19-syscall-args.patch
+    ./patches/authorize-effective-root.patch
   ];
 
   nativeBuildInputs = [
@@ -92,10 +92,6 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail '-x c - >/dev/null' '-x c - -lc >/dev/null'
     substituteInPlace cmd/Build \
       --replace-fail '#!/bin/bash' '#!${bash}/bin/bash'
-    substituteInPlace cmd/dtrace.c \
-      --replace-fail \
-        'if (getuid() != 0 && (g_mode == DMODE_LIST || g_mode == DMODE_EXEC)) {' \
-        'if (geteuid() != 0 && (g_mode == DMODE_LIST || g_mode == DMODE_EXEC)) {'
     substituteInPlace runtest.sh \
       --replace-fail /usr/bin/cpp ${stdenv.cc}/bin/cpp
     substituteInPlace libdtrace/dt_open.c \
@@ -125,7 +121,8 @@ stdenv.mkDerivation (finalAttrs: {
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    "$out/bin/dtrace" -V
+    "$out/bin/dtrace" -Vv 2>&1 \
+      | grep -Fx 'This is DTrace ${finalAttrs.version}'
     test -x "$out/bin/dtprobed"
     test -f "$out/lib/dtrace/drti/drti.o"
     runHook postInstallCheck
@@ -133,11 +130,6 @@ stdenv.mkDerivation (finalAttrs: {
 
   passthru = {
     inherit bpf-binutils bpf-gcc;
-    tests.version = testers.testVersion {
-      package = finalAttrs.finalPackage;
-      command = "dtrace -V";
-      version = finalAttrs.version;
-    };
   };
 
   meta = {
