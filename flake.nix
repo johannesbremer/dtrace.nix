@@ -90,6 +90,15 @@
         system:
         let
           pkgs = pkgsFor.${system};
+          upstreamShards = builtins.listToAttrs (
+            map (shardIndex: {
+              name = "upstream-${toString (shardIndex + 1)}";
+              value = import ./nix/tests/upstream.nix {
+                inherit pkgs self shardIndex;
+                shardCount = 8;
+              };
+            }) (nixpkgs.lib.range 0 7)
+          );
         in
         {
           package = pkgs.oracle-dtrace;
@@ -100,6 +109,7 @@
             inherit pkgs self;
           };
         }
+        // upstreamShards
       );
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt-tree);

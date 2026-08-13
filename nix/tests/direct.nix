@@ -41,7 +41,38 @@ pkgs.writeShellApplication {
     export OBJDUMP=${pkgs.binutils}/bin/objdump
     export READELF=${pkgs.binutils}/bin/readelf
 
-    if (( $# == 0 )); then
+    if [[ -n "''${DTRACE_TEST_SHARD_INDEX:-}" || -n "''${DTRACE_TEST_SHARD_COUNT:-}" ]]; then
+      if [[ ! "''${DTRACE_TEST_SHARD_INDEX:-}" =~ ^[0-9]+$ ]] ||
+         [[ ! "''${DTRACE_TEST_SHARD_COUNT:-}" =~ ^[1-9][0-9]*$ ]] ||
+         (( DTRACE_TEST_SHARD_INDEX >= DTRACE_TEST_SHARD_COUNT )); then
+        echo "DTRACE_TEST_SHARD_INDEX must select a zero-based shard within DTRACE_TEST_SHARD_COUNT" >&2
+        exit 1
+      fi
+
+      test_roots=()
+      for suite in unittest internals stress demo smoke; do
+        [[ -d "test/$suite" ]] && test_roots+=("test/$suite")
+      done
+
+      mapfile -t all_tests < <(
+        find "''${test_roots[@]}" -type f \
+          \( -name '*.d' -o -name '*.sh' -o -name '*.c' \) \
+          -print | LC_ALL=C sort -u
+      )
+
+      shard_tests=()
+      for test_index in "''${!all_tests[@]}"; do
+        if (( test_index % DTRACE_TEST_SHARD_COUNT == DTRACE_TEST_SHARD_INDEX )); then
+          shard_tests+=("''${all_tests[$test_index]}")
+        fi
+      done
+
+      echo "DTrace upstream shard $((DTRACE_TEST_SHARD_INDEX + 1))/$DTRACE_TEST_SHARD_COUNT: ''${#shard_tests[@]} cases"
+      set -- \
+        --timeout=41 \
+        --skip-longer=41 \
+        "''${shard_tests[@]}"
+    elif (( $# == 0 )); then
       set -- \
         --timeout=41 \
         --skip-longer=41 \

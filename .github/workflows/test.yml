@@ -25,19 +25,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: ${{ matrix.name }}
+  prepare:
+    name: prepare flake on ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
+        arch:
+          - x86
+          - arm
         include:
-          - name: test flake on x86
+          - arch: x86
             runner: ubuntu-26.04
-          - name: test flake on arm
+            system: x86_64-linux
+          - arch: arm
             runner: ubuntu-26.04-arm
+            system: aarch64-linux
 
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 360
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v7
@@ -46,13 +51,59 @@ jobs:
           enable_kvm: true
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          diagnostic-endpoint: ""
+          use-flakehub: false
+          use-gha-cache: true
       - name: Evaluate flake
         run: nix flake check --no-build --all-systems
-      - name: Run module assertions
+      - name: Prepare package and VMs
         run: |
-          system=$(nix eval --impure --raw --expr builtins.currentSystem)
-          nix build --no-link -L ".#checks.$system.vm"
-      - name: Run upstream Linux tests
-        run: |
-          system=$(nix eval --impure --raw --expr builtins.currentSystem)
-          nix build --no-link -L ".#checks.$system.upstream"
+          nix build --no-link -L \
+            ".#checks.${{ matrix.system }}.vm" \
+            ".#checks.${{ matrix.system }}.upstream.driver"
+
+  test:
+    name: test flake on ${{ matrix.arch }} (${{ matrix.shard }}/8)
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86
+          - arm
+        shard:
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+        include:
+          - arch: x86
+            runner: ubuntu-26.04
+            system: x86_64-linux
+          - arch: arm
+            runner: ubuntu-26.04-arm
+            system: aarch64-linux
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          enable_kvm: true
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          diagnostic-endpoint: ""
+          use-flakehub: false
+          use-gha-cache: true
+      - name: Run upstream Linux shard
+        run: nix build --no-link -L ".#checks.${{ matrix.system }}.upstream-${{ matrix.shard }}"
