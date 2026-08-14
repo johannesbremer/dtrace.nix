@@ -28,6 +28,16 @@ pkgs.writeShellApplication {
       exit 1
     fi
 
+    if [[ -n "''${DTRACE_TEST_VMEM_LIMIT_KIB:-}" ]]; then
+      if [[ ! "$DTRACE_TEST_VMEM_LIMIT_KIB" =~ ^[1-9][0-9]*$ ]]; then
+        echo "DTRACE_TEST_VMEM_LIMIT_KIB must be a positive integer" >&2
+        exit 1
+      fi
+
+      ulimit -v "$DTRACE_TEST_VMEM_LIMIT_KIB"
+      echo "Limited each upstream test process to $DTRACE_TEST_VMEM_LIMIT_KIB KiB of virtual memory"
+    fi
+
     test_dir=$(mktemp -d -t dtrace-tests.XXXXXX)
     trap 'rm -rf "$test_dir"' EXIT
 
@@ -50,7 +60,9 @@ pkgs.writeShellApplication {
       expected_base=''${expected_test%.d}
       expected_base=''${expected_base%.sh}
       expected_base=''${expected_base%.c}
-      touch "$expected_base.$arch.x"
+      expected_marker="$expected_base.$arch.x"
+      rm -f "$expected_marker"
+      touch "$expected_marker"
       ((expected_failure_count += 1))
     done < ${expectedFailures}
     echo "Applied $expected_failure_count expected failures for $arch"
@@ -110,7 +122,7 @@ pkgs.writeShellApplication {
       exit "$test_status"
     fi
 
-    if grep -Eq ': XPASS([ (.])' "$test_output"; then
+    if grep -Eq '^[0-9]+ cases \([0-9]+ PASS, [0-9]+ FAIL, [1-9][0-9]* XPASS,' "$test_output"; then
       echo "DTrace upstream tests unexpectedly passed; remove fixed tests from the expected-failure baseline" >&2
       exit 1
     fi

@@ -16,6 +16,7 @@ let
     "DTRACE_TEST_SHARD_INDEX=${toString shardIndex} "
     + "DTRACE_TEST_SHARD_COUNT=${toString shardCount} "
   );
+  testEnvironment = shardEnvironment + "DTRACE_TEST_VMEM_LIMIT_KIB=${toString (4 * 1024 * 1024)} ";
 in
 
 pkgs.testers.runNixOSTest {
@@ -55,6 +56,6 @@ pkgs.testers.runNixOSTest {
     machine.succeed("mkswap /dev/disk/by-id/virtio-dtrace-swap")
     machine.succeed("swapon /dev/disk/by-id/virtio-dtrace-swap")
 
-    machine.succeed("${shardEnvironment}dtrace-upstream-test")
+    machine.succeed("set -o pipefail; ${testEnvironment}dtrace-upstream-test 2>&1 | tee /dev/console")
   '';
 }
