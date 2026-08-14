@@ -48,6 +48,12 @@ pkgs.writeShellApplication {
 
     expected_failure_count=0
     arch=$(uname -m)
+    test_timeout=41
+    if [[ "$arch" == aarch64 ]]; then
+      test_timeout=90
+    fi
+    echo "Using a $test_timeout second per-test timeout on $arch"
+
     while IFS= read -r expected_test || [[ -n "$expected_test" ]]; do
       case "$expected_test" in
         "" | \#*) continue ;;
@@ -134,13 +140,13 @@ pkgs.writeShellApplication {
 
       echo "DTrace upstream shard $((DTRACE_TEST_SHARD_INDEX + 1))/$DTRACE_TEST_SHARD_COUNT: ''${#shard_tests[@]} cases"
       set -- \
-        --timeout=41 \
-        --skip-longer=41 \
+        --timeout="$test_timeout" \
+        --skip-longer="$test_timeout" \
         "''${shard_tests[@]}"
     elif (( $# == 0 )); then
       set -- \
-        --timeout=41 \
-        --skip-longer=41 \
+        --timeout="$test_timeout" \
+        --skip-longer="$test_timeout" \
         --testsuites=unittest,internals,stress,demo,smoke
     fi
 
