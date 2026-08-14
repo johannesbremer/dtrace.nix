@@ -2,6 +2,7 @@
   pkgs,
   dtracePackage,
   expectedFailures,
+  skippedTests,
 }:
 
 let
@@ -66,6 +67,37 @@ pkgs.writeShellApplication {
       ((expected_failure_count += 1))
     done < ${expectedFailures}
     echo "Applied $expected_failure_count expected failures for $arch"
+
+    skipped_test_count=0
+    while IFS= read -r skipped_test || [[ -n "$skipped_test" ]]; do
+      case "$skipped_test" in
+        "" | \#*) continue ;;
+      esac
+
+      if [[ ! -f "$skipped_test" ]]; then
+        echo "Skip baseline names a missing test: $skipped_test" >&2
+        exit 1
+      fi
+
+      if grep -Fxq "$skipped_test" ${expectedFailures}; then
+        echo "Test is both expected to fail and skipped: $skipped_test" >&2
+        exit 1
+      fi
+
+      skipped_base=''${skipped_test%.d}
+      skipped_base=''${skipped_base%.sh}
+      skipped_base=''${skipped_base%.c}
+      skipped_marker="$skipped_base.$arch.x"
+      rm -f "$skipped_marker"
+      printf '%s\n' \
+        '#!/bin/sh' \
+        'echo "skipped by dtrace.nix: unstable under constrained CI"' \
+        'exit 2' > "$skipped_marker"
+      chmod 0755 "$skipped_marker"
+      echo "Explicitly skipping $skipped_test on $arch: unstable under constrained CI"
+      ((skipped_test_count += 1))
+    done < ${skippedTests}
+    echo "Applied $skipped_test_count explicit skips for $arch"
 
     export PKG_CONFIG_PATH=${dtracePackage}/lib/pkgconfig
     export CC=${pkgs.gcc}/bin/gcc

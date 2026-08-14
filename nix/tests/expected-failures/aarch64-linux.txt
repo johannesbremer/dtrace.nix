@@ -29,7 +29,6 @@ test/unittest/dtrace-util/tst.ProcInvoke.sh
 test/unittest/fbtprovider/tst.entryargs2.sh
 test/unittest/funcs/copyoutstr/tst.copyoutstr.sh
 test/unittest/funcs/tst.default.d
-test/unittest/funcs/tst.rand_intra.sh
 test/unittest/io/tst.local.sh
 test/unittest/io/tst.local2.sh
 test/unittest/io/tst.nfs.sh

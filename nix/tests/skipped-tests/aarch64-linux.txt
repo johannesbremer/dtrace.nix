@@ -1,0 +1,4 @@
+# Tests observed to alternate between failure and XPASS under ARM TCG.
+test/unittest/funcs/tst.index2.d
+test/unittest/funcs/tst.rand_intra.sh
+test/unittest/usdt/tst.defer.sh

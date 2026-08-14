@@ -66,6 +66,11 @@
                 ./nix/tests/expected-failures/aarch64-linux.txt
               else
                 ./nix/tests/expected-failures/x86_64-linux.txt;
+            skippedTests =
+              if system == "aarch64-linux" then
+                ./nix/tests/skipped-tests/aarch64-linux.txt
+              else
+                ./nix/tests/skipped-tests/x86_64-linux.txt;
           };
         }
       );
