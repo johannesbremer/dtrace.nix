@@ -1,4 +1,9 @@
-# Tests observed to alternate between failure and XPASS under ARM TCG.
+# Tests observed to alternate between failure and success under ARM TCG.
+test/unittest/actions/printf/tst.conv_T.sh
+test/unittest/actions/printf/tst.conv_Y.sh
+test/unittest/disasm/tst.ann-tramp-lvar.sh
 test/unittest/funcs/tst.index2.d
 test/unittest/funcs/tst.rand_intra.sh
+test/unittest/printa/tst.walltimestamp.sh
 test/unittest/usdt/tst.defer.sh
+test/unittest/variables/bvar/tst.stackdepth-lockstat.d

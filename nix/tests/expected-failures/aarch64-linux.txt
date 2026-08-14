@@ -128,5 +128,4 @@ test/unittest/variables/bvar/tst.caller-rawfbt.d
 test/unittest/variables/bvar/tst.caller-rawtp.d
 test/unittest/variables/bvar/tst.caller-sched.d
 test/unittest/variables/bvar/tst.stackdepth-io.sh
-test/unittest/variables/bvar/tst.stackdepth-lockstat.d
 test/unittest/variables/bvar/tst.ustackdepth_big.sh

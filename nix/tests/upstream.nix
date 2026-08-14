@@ -63,6 +63,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed(f"rm -f {log_path}")
     machine.succeed(
         "systemd-run --unit=dtrace-upstream-test --service-type=exec "
+        "--property=KillSignal=SIGKILL "
         "--property=StandardOutput=append:/tmp/dtrace-upstream-test.log "
         "--property=StandardError=append:/tmp/dtrace-upstream-test.log "
         "${testEnvironment}${upstreamTest}/bin/dtrace-upstream-test"
