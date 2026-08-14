@@ -35,7 +35,7 @@ pkgs.testers.runNixOSTest {
     virtualisation.useNixStoreImage = true;
     virtualisation.emptyDiskImages = [
       {
-        size = 2048;
+        size = 8192;
         driveConfig = {
           name = "swap";
           deviceExtraOpts.serial = "dtrace-swap";

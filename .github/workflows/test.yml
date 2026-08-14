@@ -112,12 +112,15 @@ jobs:
         with:
           name: nix-cache-x86_64-linux
           path: ${{ runner.temp }}/nix-cache
-      - name: Run upstream Linux shard
+      - name: Restore prepared Nix closure
         run: |
-          nix build --no-link -L \
-            --option extra-substituters "file://${RUNNER_TEMP}/nix-cache" \
-            --option require-sigs false \
-            ".#checks.x86_64-linux.upstream-${{ matrix.shard }}"
+          nix copy --no-check-sigs \
+            --from "file://${RUNNER_TEMP}/nix-cache" \
+            ".#packages.x86_64-linux.dtrace-bpf-binutils" \
+            ".#packages.x86_64-linux.dtrace-bpf-gcc" \
+            ".#packages.x86_64-linux.oracle-dtrace^*"
+      - name: Run upstream Linux shard
+        run: nix build --no-link -L ".#checks.x86_64-linux.upstream-${{ matrix.shard }}"
 
   test-arm:
     name: test flake on arm (${{ matrix.shard }}/16)
@@ -158,9 +161,12 @@ jobs:
         with:
           name: nix-cache-aarch64-linux
           path: ${{ runner.temp }}/nix-cache
-      - name: Run upstream Linux shard
+      - name: Restore prepared Nix closure
         run: |
-          nix build --no-link -L \
-            --option extra-substituters "file://${RUNNER_TEMP}/nix-cache" \
-            --option require-sigs false \
-            ".#checks.aarch64-linux.upstream-${{ matrix.shard }}"
+          nix copy --no-check-sigs \
+            --from "file://${RUNNER_TEMP}/nix-cache" \
+            ".#packages.aarch64-linux.dtrace-bpf-binutils" \
+            ".#packages.aarch64-linux.dtrace-bpf-gcc" \
+            ".#packages.aarch64-linux.oracle-dtrace^*"
+      - name: Run upstream Linux shard
+        run: nix build --no-link -L ".#checks.aarch64-linux.upstream-${{ matrix.shard }}"

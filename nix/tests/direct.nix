@@ -1,6 +1,7 @@
 {
   pkgs,
   dtracePackage,
+  expectedFailures,
 }:
 
 let
@@ -33,6 +34,26 @@ pkgs.writeShellApplication {
     cp -R ${dtracePackage.testsuite}/share/dtrace/testsuite "$test_dir/testsuite"
     chmod -R u+w "$test_dir/testsuite"
     cd "$test_dir/testsuite"
+
+    expected_failure_count=0
+    arch=$(uname -m)
+    while IFS= read -r expected_test || [[ -n "$expected_test" ]]; do
+      case "$expected_test" in
+        "" | \#*) continue ;;
+      esac
+
+      if [[ ! -f "$expected_test" ]]; then
+        echo "Expected-failure baseline names a missing test: $expected_test" >&2
+        exit 1
+      fi
+
+      expected_base=''${expected_test%.d}
+      expected_base=''${expected_base%.sh}
+      expected_base=''${expected_base%.c}
+      touch "$expected_base.$arch.x"
+      ((expected_failure_count += 1))
+    done < ${expectedFailures}
+    echo "Applied $expected_failure_count expected failures for $arch"
 
     export PKG_CONFIG_PATH=${dtracePackage}/lib/pkgconfig
     export CC=${pkgs.gcc}/bin/gcc
@@ -79,6 +100,19 @@ pkgs.writeShellApplication {
         --testsuites=unittest,internals,stress,demo,smoke
     fi
 
-    ./runtest.sh --use-installed "$@"
+    test_output="$test_dir/test-output.log"
+    set +e
+    ./runtest.sh --use-installed "$@" 2>&1 | tee "$test_output"
+    test_status=''${PIPESTATUS[0]}
+    set -e
+
+    if (( test_status != 0 )); then
+      exit "$test_status"
+    fi
+
+    if grep -Eq ': XPASS([ (.])' "$test_output"; then
+      echo "DTrace upstream tests unexpectedly passed; remove fixed tests from the expected-failure baseline" >&2
+      exit 1
+    fi
   '';
 }

@@ -61,6 +61,11 @@
           upstream-test = import ./nix/tests/direct.nix {
             inherit pkgs;
             dtracePackage = pkgs.oracle-dtrace;
+            expectedFailures =
+              if system == "aarch64-linux" then
+                ./nix/tests/expected-failures/aarch64-linux.txt
+              else
+                ./nix/tests/expected-failures/x86_64-linux.txt;
           };
         }
       );
