@@ -90,14 +90,15 @@
         system:
         let
           pkgs = pkgsFor.${system};
+          upstreamShardCount = if system == "x86_64-linux" then 4 else 16;
           upstreamShards = builtins.listToAttrs (
             map (shardIndex: {
               name = "upstream-${toString (shardIndex + 1)}";
               value = import ./nix/tests/upstream.nix {
                 inherit pkgs self shardIndex;
-                shardCount = 8;
+                shardCount = upstreamShardCount;
               };
-            }) (nixpkgs.lib.range 0 7)
+            }) (nixpkgs.lib.range 0 (upstreamShardCount - 1))
           );
         in
         {
