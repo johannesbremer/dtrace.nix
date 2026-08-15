@@ -36,6 +36,7 @@ stdenv.mkDerivation (finalAttrs: {
     ./patches/fix-linux-6.19-syscall-args.patch
     ./patches/authorize-effective-root.patch
     ./patches/add-declared-timeout-cutoff.patch
+    ./patches/relax-raise3-deadlines.patch
   ];
 
   nativeBuildInputs = [

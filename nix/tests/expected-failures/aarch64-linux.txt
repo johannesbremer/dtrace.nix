@@ -19,14 +19,12 @@ test/unittest/dtrace-util/tst.ListProbesFuncUSDT.sh
 test/unittest/dtrace-util/tst.ListProbesModuleClause.sh
 test/unittest/dtrace-util/tst.ListProbesModuleUSDT.sh
 test/unittest/dtrace-util/tst.ListProbesNameUSDT.sh
-test/unittest/dtrace-util/tst.ListProbesProviderUSDT.sh
 test/unittest/dtrace-util/tst.PreprocessorHashbang.sh
 test/unittest/dtrace-util/tst.ProcGrab.sh
 test/unittest/dtrace-util/tst.ProcInvoke.sh
 test/unittest/io/tst.local2.sh
 test/unittest/io/tst.nfs.sh
 test/unittest/io/tst.nfs2.sh
-test/unittest/io/tst.wait.sh
 test/unittest/ip/tst.ipv4localtcp.sh
 test/unittest/ip/tst.ipv4remotetcp.sh
 test/unittest/lockstat/tst.lockstat-summary.d
@@ -35,7 +33,6 @@ test/unittest/options/tst.ctypes.sh
 test/unittest/options/tst.dtypes.sh
 test/unittest/options/tst.linkmode.sh
 test/unittest/options/tst.switchrate.sh
-test/unittest/options/tst.tregs.sh
 test/unittest/pcap/tst.pcap.tshark.sh
 test/unittest/pid/tst.args1.d
 test/unittest/pid/tst.coverage.d
@@ -62,11 +59,9 @@ test/unittest/tcp/tst.ipv4remotetcp.sh
 test/unittest/tcp/tst.ipv4remotetcpstate.sh
 test/unittest/usdt/tst.defer-Z.sh
 test/unittest/usdt/tst.dlclose4.sh
-test/unittest/usdt/tst.exec-dof-replacement.sh
 test/unittest/usdt/tst.lingering.sh
 test/unittest/usdt/tst.multiprov-dupprobe-shlibs.sh
 test/unittest/usdt/tst.multitrace.sh
-test/unittest/usdt/tst.onlyenabled.sh
 test/unittest/usdt/tst.pidargmap.sh
 test/unittest/usdt/tst.pidargs.sh
 test/unittest/usdt/tst.pidprobes.sh
