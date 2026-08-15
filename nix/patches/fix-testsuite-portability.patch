@@ -1,0 +1,33 @@
+From: dtrace.nix maintainers
+Subject: tests: quote literal plus signs for modern awk
+
+The postprocessors intend to remove a symbol offset beginning with "+0x".
+An unescaped leading plus is not a valid extended regular expression in
+modern gawk, so the postprocessor itself fails before it can assess DTrace's
+output.
+
+diff --git a/test/unittest/stack/tst.stack_fbt.sh b/test/unittest/stack/tst.stack_fbt.sh
+index 6275646c..ef5a56ea 100755
+--- a/test/unittest/stack/tst.stack_fbt.sh
++++ b/test/unittest/stack/tst.stack_fbt.sh
+@@ -43,6 +43,6 @@ fi
+ awk 'NF != 0 { sub("\\.constprop\\.[0-9]", "");
+                sub("_after_hwframe\\+", "+");
+-               sub(/+0x[0-9a-f]*$/, "");
++               sub(/\+0x[0-9a-f]*$/, "");
+                sub(/^ */, "");
+                print }' dtrace.out > dtrace.post
+ if [ $? -ne 0 ]; then
+diff --git a/test/unittest/variables/bvar/check_caller_to_stack2.awk b/test/unittest/variables/bvar/check_caller_to_stack2.awk
+index 8499852a..5527a610 100755
+--- a/test/unittest/variables/bvar/check_caller_to_stack2.awk
++++ b/test/unittest/variables/bvar/check_caller_to_stack2.awk
+@@ -16,7 +16,7 @@ NF != 0 {
+ 
+ 	# Now we have the caller frame.  Strip off the offset.
+ 	expect=$1
+-	sub("+0x[0-9a-f]*$", "", expect);
++	sub("\\+0x[0-9a-f]*$", "", expect);
+ 
+ 	# Finally, get the sym(caller) output.
+ 	if (getline != 1) { print "ERROR: missing expected output"; exit(1); }

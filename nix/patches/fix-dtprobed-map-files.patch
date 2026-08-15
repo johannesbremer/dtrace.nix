@@ -1,0 +1,66 @@
+From c6777325548ef507af84de24b7bb846a84d9794a Mon Sep 17 00:00:00 2001
+From: Eugene Loh <eugene.loh@oracle.com>
+Date: Thu, 12 Feb 2026 19:17:29 +0000
+Subject: [PATCH] dtprobed: use /proc/$pid/map_files, not the filename of the
+ mapping
+
+Instead of using prf->prf_mapname (which resolves to the mapped file's
+target), use Pmap_mapfile_name() to get the actual
+/proc/$pid/map_files/* path.  These magic symlinks can be opened even
+when their corresponding files are deleted or in an inaccessible
+filesystem namespace, ensuring we can read the mapping contents
+reliably.  DTrace already does this to read mappings during USDT probe
+lookup.
+
+(We still use prf->prf_mapname to determine the module name used in the
+dof helper, and thus ultimately in the probespec, because that should be
+an actual user-readable module name, not some random address-space-like
+filename: it doesn't matter that that name might not exist on the
+filesystem.  Thanks to Eugene Loh for spotting this and Kris van Hees
+for fixing it.)
+
+Fixes issues with probes in paths like /home when dtprobed
+is sandboxed by systemd.
+
+Tested on both systemd and non-systemd (non-jailed) systems, with USDT
+programs running out of /tmp, /usr/local and /home.
+
+Signed-off-by: Nick Alcock <nick.alcock@oracle.com>
+Reviewed-by: Kris Van Hees <kris.van.hees@oracle.com>
+---
+ dtprobed/dtprobed.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/dtprobed/dtprobed.c b/dtprobed/dtprobed.c
+index a8085865..37d615bb 100644
+--- a/dtprobed/dtprobed.c
++++ b/dtprobed/dtprobed.c
+@@ -1,6 +1,6 @@
+ /*
+  * Oracle Linux DTrace; DOF-consumption and storage daemon.
+- * Copyright (c) 2022, 2025, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2022, 2026, Oracle and/or its affiliates. All rights reserved.
+  * Licensed under the Universal Permissive License v 1.0 as shown at
+  * http://oss.oracle.com/licenses/upl.
+  */
+@@ -487,16 +487,17 @@ handle_usdt_notes(pid_t pid, uintptr_t addr)
+ 		fuse_log(FUSE_LOG_ERR, "%i: dtprobed: cannot look up mapping (process dead?)\n",
+ 			 pid);
+ 		goto out;
+-	} else if ((fn = prf->prf_mapname) == NULL) {
++	} else if (prf->prf_mapname == NULL ||
++		   (fn = Pmap_mapfile_name(P, mapp)) == NULL) {
+ 		fuse_log(FUSE_LOG_ERR, "%i: dtprobed: cannot look up mapname (process dead?)\n",
+ 			 pid);
+ 		goto out;
+ 	}
+-	mod = strrchr(fn, '/');
++	mod = strrchr(prf->prf_mapname, '/');
+ 	if (mod)
+ 		mod++;
+ 	else
+-		mod = fn;
++		mod = prf->prf_mapname;
+ 	snprintf(dh.dofhp_mod, sizeof(dh.dofhp_mod), "%s", mod);
+ 
+ 	dh.dofhp_addr = mapp->pr_vaddr;

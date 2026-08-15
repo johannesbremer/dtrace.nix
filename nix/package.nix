@@ -8,6 +8,7 @@
   bison,
   flex,
   gawk,
+  iproute2,
   pkg-config,
   binutils-unwrapped,
   elfutils,
@@ -34,10 +35,15 @@ stdenv.mkDerivation (finalAttrs: {
   patches = [
     ./patches/fix-fortify-usdt-parser.patch
     ./patches/fix-linux-6.19-syscall-args.patch
+    ./patches/fix-usdt-hyphen-function.patch
+    ./patches/fix-pid-pie-offset-probes.patch
+    ./patches/fix-pidprobes-pie-test.patch
+    ./patches/fix-dtprobed-map-files.patch
     ./patches/authorize-effective-root.patch
     ./patches/add-declared-timeout-cutoff.patch
     ./patches/relax-raise3-deadlines.patch
     ./patches/fix-runtest-core-pattern-restore.patch
+    ./patches/fix-testsuite-portability.patch
   ];
 
   nativeBuildInputs = [
@@ -97,6 +103,12 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail '#!/bin/bash' '#!${bash}/bin/bash'
     substituteInPlace runtest.sh \
       --replace-fail /usr/bin/cpp ${stdenv.cc}/bin/cpp
+    substituteInPlace \
+      test/unittest/ip/tst.ipv6localicmp.sh \
+      test/unittest/tcp/tst.ipv6localtcp.sh \
+      test/unittest/tcp/tst.ipv6localtcpstate.sh \
+      test/unittest/udp/tst.ipv6localudp.sh \
+      --replace-fail /sbin/ip ${iproute2}/bin/ip
     substituteInPlace libdtrace/dt_open.c \
       --replace-fail \
         'static const char *_dtrace_defcpp = "cpp";' \
@@ -107,7 +119,19 @@ stdenv.mkDerivation (finalAttrs: {
     substituteInPlace test/triggers/Build \
       --replace-fail \
         'visible-constructor visible-constructor-static visible-constructor-static-unstripped' \
-        'visible-constructor'
+        'visible-constructor' \
+      --replace-fail \
+        '-Wl,-rpath test/triggers' \
+        "-Wl,-rpath,'\$\$ORIGIN'"
+    for postprocessor in test/internals/libproc/tst.pldd*.r.p; do
+      substituteInPlace "$postprocessor" \
+        --replace-fail \
+          's:/usr/lib:/lib:g' \
+          's:/usr/lib:/lib:g
+s:/nix/store/[^ /,)]*-glibc-[^ /,)]*/lib/libc\.so\.6:/lib64/libc.so.6:g
+s:/nix/store/[^ /,)]*-glibc-[^ /,)]*/lib/ld-linux-x86-64\.so\.2:/lib64/ld-linux-x86-64.so.2:g
+s:/nix/store/[^ /,)]*-glibc-[^ /,)]*/lib/ld-linux-aarch64\.so\.1:/lib/ld-linux-aarch64.so.1:g'
+    done
   '';
 
   enableParallelBuilding = true;

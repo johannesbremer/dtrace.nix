@@ -1,7 +1,0 @@
-# Output- and timing-sensitive tests that are unstable on GitHub's KVM runners.
-test/unittest/actions/printf/tst.conv_T.sh
-test/unittest/actions/printf/tst.conv_Y.sh
-test/unittest/disasm/tst.ann-tramp-lvar.sh
-test/unittest/print/tst.print.modtype.d
-test/unittest/printa/tst.walltimestamp.sh
-test/unittest/usdt/tst.defer-Z.sh

@@ -1,0 +1,52 @@
+From 2ff4f06670bd3e8ea160df2ca5495f9c256f638e Mon Sep 17 00:00:00 2001
+From: Kris Van Hees <kris.van.hees@oracle.com>
+Date: Mon, 9 Feb 2026 07:47:51 -0500
+Subject: [PATCH] test: adjust tst.pidprobes.sh to account for PIE executables
+
+When the test executable is compiled as position independent code,
+the comparison with expected results fails unless the reported PC
+values are adjusted based on the actual load address.  This is safe
+to do in general, because for non-PIE cases the adjustment will be
+0.
+
+Signed-off-by: Kris Van Hees <kris.van.hees@oracle.com>
+Reviewed-by: Eugene Loh <eugene.loh@oracle.com>
+---
+ test/unittest/usdt/tst.pidprobes.sh | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/test/unittest/usdt/tst.pidprobes.sh b/test/unittest/usdt/tst.pidprobes.sh
+index 24fbd518..80de5140 100755
+--- a/test/unittest/usdt/tst.pidprobes.sh
++++ b/test/unittest/usdt/tst.pidprobes.sh
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ #
+ # Oracle Linux DTrace.
+-# Copyright (c) 2024, 2025, Oracle and/or its affiliates. All rights reserved.
++# Copyright (c) 2024, 2026, Oracle and/or its affiliates. All rights reserved.
+ # Licensed under the Universal Permissive License v 1.0 as shown at
+ # http://oss.oracle.com/licenses/upl.
+ #
+@@ -119,8 +119,11 @@ fi
+ pcs=`awk '{print strtonum("0x"$1)}' disasm_foo.txt`
+ pc0=`echo $pcs | awk '{print $1}'`
+ 
+-# Construct D script:  add a pid$pid::-:$absoff probe for each PC in foo.
++# Construct D script:  add a pid$pid::-:$pc0 probe to determine base address.
++printf 'p*d$target::-:%x\n' $pc0 >> pidprobes.d
++printf '{\n\tbase = uregs[R_PC] - %s;\n}\n' $pc0 >> pidprobes.d
+ 
++# Construct D script:  add a pid$pid::-:$absoff probe for each PC in foo.
+ for pc in $pcs; do
+ 	printf 'p*d$target::-:%x,\n' $pc >> pidprobes.d
+ done
+@@ -130,7 +133,7 @@ done
+ cat >> pidprobes.d <<'EOF'
+ p*d$target::foo:
+ {
+-	printf("%d %s:%s:%s:%s %x\n", pid, probeprov, probemod, probefunc, probename, uregs[R_PC]);
++	printf("%d %s:%s:%s:%s %x\n", pid, probeprov, probemod, probefunc, probename, uregs[R_PC] - base);
+ }
+ EOF
+ 

@@ -1,0 +1,90 @@
+From 814a29b3fd601c3299ff0b4de080afe6a9c93359 Mon Sep 17 00:00:00 2001
+From: Kris Van Hees <kris.van.hees@oracle.com>
+Date: Mon, 26 Jan 2026 12:12:08 -0500
+Subject: [PATCH] pid: ensure pid offset probes perform lookup with adjusted
+ address
+
+For PIE executables and libraries, pid offset probes need to have the
+address adjusted based on the actual segment load address.
+
+Signed-off-by: Kris Van Hees <kris.van.hees@oracle.com>
+Reviewed-by: Nick Alcock <nick.alcock@oracle.com>
+---
+ include/sys/sol_procfs.h | 3 ++-
+ libdtrace/dt_pid.c       | 3 +++
+ libproc/Psymtab.c        | 7 +++++--
+ 3 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/include/sys/sol_procfs.h b/include/sys/sol_procfs.h
+index d195a108d..49eb29fb6 100644
+--- a/include/sys/sol_procfs.h
++++ b/include/sys/sol_procfs.h
+@@ -1,6 +1,6 @@
+ /*
+  * Oracle Linux DTrace.
+- * Copyright (c) 2006, 2022, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2006, 2026, Oracle and/or its affiliates. All rights reserved.
+  * Licensed under the Universal Permissive License v 1.0 as shown at
+  * http://oss.oracle.com/licenses/upl.
+  */
+@@ -50,6 +50,7 @@ typedef struct prmap {
+ 
+ 
+ /* Protection and attribute flags */
++#define	MA_PIC		0x08	/* position independent code */
+ #define	MA_READ		0x04	/* readable by the traced process */
+ #define	MA_WRITE	0x02	/* writable by the traced process */
+ #define	MA_EXEC		0x01	/* executable by the traced process */
+diff --git a/libdtrace/dt_pid.c b/libdtrace/dt_pid.c
+index ed329b9de..5c62548b6 100644
+--- a/libdtrace/dt_pid.c
++++ b/libdtrace/dt_pid.c
+@@ -55,6 +55,7 @@ typedef struct dt_pid_probe {
+ 	dev_t dpp_dev;
+ 	ino_t dpp_inum;
+ 	const char *dpp_fname;
++	uintptr_t dpp_base;
+ 	uintptr_t dpp_vaddr;
+ 	Lmid_t dpp_lmid;
+ 	uint_t dpp_nmatches;
+@@ -202,6 +203,7 @@ dt_pid_per_sym(dt_pid_probe_t *pp, const GElf_Sym *symp, const char *func)
+ 		}
+ 
+ 		psp->pps_nameoff = off;
++		off += pp->dpp_base;
+ 
+ 		if (dt_Plookup_by_addr(dtp, pid, off, (const char **)&psp->pps_fun, &sym)) {
+ 			rc = dt_pid_error(dtp, dpr, D_PROC_NAME,
+@@ -470,6 +472,7 @@ dt_pid_per_mod(void *arg, const prmap_t *pmp, const char *obj)
+ 	pp->dpp_dev = pmp->pr_dev;
+ 	pp->dpp_inum = pmp->pr_inum;
+ 	pp->dpp_vaddr = pmp->pr_file->first_segment->pr_vaddr;
++	pp->dpp_base = (pmp->pr_mflags & MA_PIC) ? pp->dpp_vaddr : 0;
+ 
+ 	/*
+ 	 * Note: if an execve() happens in the victim after this point, the
+diff --git a/libproc/Psymtab.c b/libproc/Psymtab.c
+index e272e90e5..e648c5aa4 100644
+--- a/libproc/Psymtab.c
++++ b/libproc/Psymtab.c
+@@ -1,6 +1,6 @@
+ /*
+  * Oracle Linux DTrace.
+- * Copyright (c) 2009, 2023, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2009, 2026, Oracle and/or its affiliates. All rights reserved.
+  * Licensed under the Universal Permissive License v 1.0 as shown at
+  * http://oss.oracle.com/licenses/upl.
+  */
+@@ -742,8 +742,11 @@ Pupdate_maps(struct ps_prochandle *P)
+ 
+ 			if (mptr->map_file &&
+ 			    mptr->map_file->file_map == -1 &&
+-			    mptr->map_pmap->pr_file->prf_text_map == mptr->map_pmap)
++			    mptr->map_pmap->pr_file->prf_text_map == mptr->map_pmap) {
+ 				mptr->map_file->file_map = P->num_mappings;
++				if (mptr->map_file->file_etype == ET_DYN)
++					mptr->map_pmap->pr_mflags |= MA_PIC;
++			}
+ 		}
+ 
+ 		_dprintf("Added mapping for %s: %lx:%lx %lx(%lx)\n",

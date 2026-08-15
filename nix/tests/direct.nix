@@ -1,8 +1,6 @@
 {
   pkgs,
   dtracePackage,
-  expectedFailures,
-  skippedTests,
 }:
 
 let
@@ -46,7 +44,6 @@ pkgs.writeShellApplication {
     chmod -R u+w "$test_dir/testsuite"
     cd "$test_dir/testsuite"
 
-    expected_failure_count=0
     arch=$(uname -m)
     test_timeout=41
     if [[ "$arch" == aarch64 ]]; then
@@ -54,58 +51,8 @@ pkgs.writeShellApplication {
     fi
     echo "Using a $test_timeout second per-test timeout on $arch"
 
-    while IFS= read -r expected_test || [[ -n "$expected_test" ]]; do
-      case "$expected_test" in
-        "" | \#*) continue ;;
-      esac
-
-      if [[ ! -f "$expected_test" ]]; then
-        echo "Expected-failure baseline names a missing test: $expected_test" >&2
-        exit 1
-      fi
-
-      expected_base=''${expected_test%.d}
-      expected_base=''${expected_base%.sh}
-      expected_base=''${expected_base%.c}
-      expected_marker="$expected_base.$arch.x"
-      rm -f "$expected_marker"
-      touch "$expected_marker"
-      ((expected_failure_count += 1))
-    done < ${expectedFailures}
-    echo "Applied $expected_failure_count expected failures for $arch"
-
-    skipped_test_count=0
-    while IFS= read -r skipped_test || [[ -n "$skipped_test" ]]; do
-      case "$skipped_test" in
-        "" | \#*) continue ;;
-      esac
-
-      if [[ ! -f "$skipped_test" ]]; then
-        echo "Skip baseline names a missing test: $skipped_test" >&2
-        exit 1
-      fi
-
-      if grep -Fxq "$skipped_test" ${expectedFailures}; then
-        echo "Test is both expected to fail and skipped: $skipped_test" >&2
-        exit 1
-      fi
-
-      skipped_base=''${skipped_test%.d}
-      skipped_base=''${skipped_base%.sh}
-      skipped_base=''${skipped_base%.c}
-      skipped_marker="$skipped_base.$arch.x"
-      rm -f "$skipped_marker"
-      printf '%s\n' \
-        '#!/bin/sh' \
-        'echo "skipped by dtrace.nix: unstable under constrained CI"' \
-        'exit 2' > "$skipped_marker"
-      chmod 0755 "$skipped_marker"
-      echo "Explicitly skipping $skipped_test on $arch: unstable under constrained CI"
-      ((skipped_test_count += 1))
-    done < ${skippedTests}
-    echo "Applied $skipped_test_count explicit skips for $arch"
-
     export PKG_CONFIG_PATH=${dtracePackage}/lib/pkgconfig
+    export TZDIR=${pkgs.tzdata}/share/zoneinfo
     export CC=${pkgs.gcc}/bin/gcc
     export NM=${pkgs.binutils}/bin/nm
     export OBJCOPY=${pkgs.binutils}/bin/objcopy
@@ -161,7 +108,7 @@ pkgs.writeShellApplication {
     fi
 
     if grep -Eq '^[0-9]+ cases \([0-9]+ PASS, [0-9]+ FAIL, [1-9][0-9]* XPASS,' "$test_output"; then
-      echo "DTrace upstream tests unexpectedly passed; remove fixed tests from the expected-failure baseline" >&2
+      echo "An upstream expected failure unexpectedly passed" >&2
       exit 1
     fi
   '';

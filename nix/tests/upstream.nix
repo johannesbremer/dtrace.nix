@@ -29,6 +29,10 @@ pkgs.testers.runNixOSTest {
     imports = [ self.nixosModules.default ];
     programs.dtrace.enable = true;
 
+    boot.kernelModules = [ "tun" ];
+    services.nfs.server.enable = true;
+    services.openssh.enable = true;
+
     environment.systemPackages = [ upstreamTest ];
 
     virtualisation.memorySize = 8192;
