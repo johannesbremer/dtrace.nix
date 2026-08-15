@@ -9,10 +9,24 @@ let
   '';
   usdtSource = pkgs.writeText "nixos-port.c" ''
     #include <sys/sdt.h>
+    #include <unistd.h>
 
-    int main(void)
+    static void fire(void)
     {
       DTRACE_PROBE(nixos_port, fire);
+    }
+
+    int main(int argc, char **argv)
+    {
+      if (argc > 1) {
+        (void)argv;
+        for (;;) {
+          sleep(1);
+          fire();
+        }
+      }
+
+      fire();
       return 0;
     }
   '';
@@ -44,7 +58,11 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("dtprobed.service")
     machine.wait_until_succeeds("test -c /dev/dtrace/helper")
-    machine.wait_until_succeeds("test $(stat -c %U:%G:%a /dev/dtrace/helper) = root:dtrace:660")
+    machine.wait_until_succeeds("test $(stat -c %a /dev/dtrace/helper) = 666")
+    before = machine.succeed(
+      "systemctl show --property=Before --value dtprobed.service"
+    ).split()
+    assert "basic.target" in before
     machine.succeed("test $(stat -c %U:%G:%a /run/wrappers/bin/dtrace) = root:dtrace:4550")
     machine.succeed("id -nG tracer | grep -qw dtrace")
     machine.fail("runuser -u outsider -- /run/wrappers/bin/dtrace -l")
@@ -54,6 +72,12 @@ pkgs.testers.runNixOSTest {
       "dtrace -q -n 'BEGIN { trace(\"nixos-dtrace-ok\"); exit(0); }'"
     )
     assert "nixos-dtrace-ok" in output
+
+    machine.succeed(
+      "PATH=/no-such-path ${dtracePackage}/bin/dtrace -C -h "
+      "-s ${usdtProvider} -o /tmp/nixos-port.h"
+    )
+    machine.succeed("test -s /tmp/nixos-port.h")
 
     output = machine.succeed(
       "runuser -u tracer -- /run/wrappers/bin/dtrace -q "
@@ -95,5 +119,24 @@ pkgs.testers.runNixOSTest {
       "{ trace(\"nixos-usdt-ok\"); exit(0); }'"
     )
     assert "nixos-usdt-ok" in output
+
+    machine.succeed(
+      "systemd-run --unit=nixos-port-outsider --property=User=outsider "
+      "/tmp/nixos-port wait"
+    )
+    machine.wait_for_unit("nixos-port-outsider.service")
+    outsider_pid = machine.succeed(
+      "systemctl show --property=MainPID --value nixos-port-outsider.service"
+    ).strip()
+    machine.wait_until_succeeds(
+      f"dtrace -l -p {outsider_pid} -n 'nixos_port$target:::fire'"
+    )
+    output = machine.succeed(
+      f"dtrace -q -p {outsider_pid} "
+      "-n 'nixos_port$target:::fire "
+      "{ trace(\"nixos-unprivileged-usdt-ok\"); exit(0); }'"
+    )
+    assert "nixos-unprivileged-usdt-ok" in output
+    machine.succeed("systemctl stop nixos-port-outsider.service")
   '';
 }

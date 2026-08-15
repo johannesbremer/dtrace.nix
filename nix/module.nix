@@ -38,7 +38,7 @@ in
     users.groups.dtrace.members = cfg.users;
 
     services.udev.extraRules = ''
-      KERNEL=="dtrace/helper", GROUP="dtrace", MODE="0660"
+      KERNEL=="dtrace/helper", MODE="0666"
     '';
 
     boot.kernelModules = [ "cuse" ];
@@ -54,13 +54,27 @@ in
     systemd.services.dtprobed = {
       description = "DTrace USDT probe creation daemon";
       documentation = [ "man:dtprobed(8)" ];
-      wantedBy = [ "multi-user.target" ];
+      wantedBy = [ "basic.target" ];
+      before = [ "basic.target" ];
+      wants = [
+        "sysinit.target"
+        "sockets.target"
+        "paths.target"
+      ];
       after = [
+        "sysinit.target"
+        "sockets.target"
+        "paths.target"
         "systemd-udevd.service"
         "systemd-modules-load.service"
       ];
-      requires = [ "systemd-udevd.service" ];
+      requires = [
+        "sysinit.target"
+        "systemd-udevd.service"
+      ];
       restartTriggers = [ cfg.package ];
+
+      unitConfig.DefaultDependencies = false;
 
       serviceConfig = {
         Type = "notify";

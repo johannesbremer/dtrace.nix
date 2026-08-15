@@ -113,9 +113,6 @@
         in
         {
           package = pkgs.oracle-dtrace;
-          upstream = import ./nix/tests/upstream.nix {
-            inherit pkgs self;
-          };
           vm = import ./nix/tests/vm.nix {
             inherit pkgs self;
           };

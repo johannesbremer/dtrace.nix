@@ -49,6 +49,8 @@ Members of `programs.dtrace.users` receive access through the `dtrace` group
 and a group-restricted setuid wrapper. DTrace provides system-wide
 observability, so this is a privileged role: only add fully trusted users.
 Commands started with `dtrace -c` run as the calling user, not as root.
+The `/dev/dtrace/helper` device remains available to all processes so they can
+register USDT providers; access to that device does not grant tracing rights.
 
 ## Requirements
 

@@ -1,0 +1,24 @@
+From: NixOS DTrace maintainers
+Subject: runtest: restore core dump settings after root test runs
+
+The test harness saves core_pattern and core_uses_pid before changing them,
+but its cleanup condition is reversed.  Since core_pattern is normally
+non-empty, direct test runs leave both system-wide settings modified.
+
+Restore the saved values whenever they were successfully captured.
+
+diff --git a/runtest.sh b/runtest.sh
+index 8bf9b10..e750e40 100755
+--- a/runtest.sh
++++ b/runtest.sh
+@@ -400,9 +400,9 @@ closedown()
+     for pid in ${ZAPTHESE[@]}; do
+         kill -9 -- $pid
+     done
+-    if [[ -z $orig_core_pattern ]]; then
+-        echo $orig_core_pattern > /proc/sys/kernel/core_pattern
+-        echo $orig_core_uses_pid > /proc/sys/kernel/core_uses_pid
++    if [[ -n $orig_core_pattern ]]; then
++        printf '%s\n' "$orig_core_pattern" > /proc/sys/kernel/core_pattern
++        printf '%s\n' "$orig_core_uses_pid" > /proc/sys/kernel/core_uses_pid
+     fi

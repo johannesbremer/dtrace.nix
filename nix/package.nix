@@ -37,6 +37,7 @@ stdenv.mkDerivation (finalAttrs: {
     ./patches/authorize-effective-root.patch
     ./patches/add-declared-timeout-cutoff.patch
     ./patches/relax-raise3-deadlines.patch
+    ./patches/fix-runtest-core-pattern-restore.patch
   ];
 
   nativeBuildInputs = [
@@ -98,6 +99,9 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail /usr/bin/cpp ${stdenv.cc}/bin/cpp
     substituteInPlace libdtrace/dt_open.c \
       --replace-fail \
+        'static const char *_dtrace_defcpp = "cpp";' \
+        'static const char *_dtrace_defcpp = "${stdenv.cc}/bin/cpp";' \
+      --replace-fail \
         'static const char *_dtrace_defld = "ld";' \
         'static const char *_dtrace_defld = "${binutils-unwrapped}/bin/ld";'
     substituteInPlace test/triggers/Build \
@@ -127,6 +131,7 @@ stdenv.mkDerivation (finalAttrs: {
       | grep -Fx 'This is DTrace ${finalAttrs.version}'
     test -x "$out/bin/dtprobed"
     test -f "$out/lib/dtrace/drti/drti.o"
+    grep -aFq '${stdenv.cc}/bin/cpp' "$out/lib/libdtrace.so"
     runHook postInstallCheck
   '';
 
