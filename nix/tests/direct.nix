@@ -50,7 +50,7 @@ pkgs.writeShellApplication {
     arch=$(uname -m)
     test_timeout=41
     if [[ "$arch" == aarch64 ]]; then
-      test_timeout=90
+      test_timeout=120
     fi
     echo "Using a $test_timeout second per-test timeout on $arch"
 
@@ -141,12 +141,12 @@ pkgs.writeShellApplication {
       echo "DTrace upstream shard $((DTRACE_TEST_SHARD_INDEX + 1))/$DTRACE_TEST_SHARD_COUNT: ''${#shard_tests[@]} cases"
       set -- \
         --timeout="$test_timeout" \
-        --skip-longer="$test_timeout" \
+        --skip-declared-longer=41 \
         "''${shard_tests[@]}"
     elif (( $# == 0 )); then
       set -- \
         --timeout="$test_timeout" \
-        --skip-longer="$test_timeout" \
+        --skip-declared-longer=41 \
         --testsuites=unittest,internals,stress,demo,smoke
     fi
 

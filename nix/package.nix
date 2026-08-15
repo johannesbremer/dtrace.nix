@@ -35,6 +35,7 @@ stdenv.mkDerivation (finalAttrs: {
     ./patches/fix-fortify-usdt-parser.patch
     ./patches/fix-linux-6.19-syscall-args.patch
     ./patches/authorize-effective-root.patch
+    ./patches/add-declared-timeout-cutoff.patch
   ];
 
   nativeBuildInputs = [
