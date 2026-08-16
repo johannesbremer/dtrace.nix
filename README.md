@@ -74,7 +74,9 @@ Upstream tests are divided by intent instead of being silently omitted:
 - `upstream-core-*` contains tests with no declared long timeout, or a timeout
   of at most 41 seconds.
 - `upstream-long-*` contains the remaining explicitly long tests.
-- `upstream-stress-*` contains Oracle's stress suite.
+- `upstream-stress-*` contains Oracle's stress suite and tests explicitly
+  annotated with `@@nix-coverage: stress` because their intended probe scope is
+  itself resource-intensive.
 
 CI selects an explicit accelerated or emulated execution profile. Profiles
 control QEMU acceleration, timeouts, guest RAM and swap, and shard counts;

@@ -72,23 +72,17 @@ pkgs.writeShellApplication {
 
     if (( $# == 0 )); then
       case "$coverage" in
-        core|long)
-          test_roots=()
-          for suite in unittest internals demo smoke; do
-            [[ -d "test/$suite" ]] && test_roots+=("test/$suite")
-          done
-          ;;
-        stress|expensive)
-          test_roots=("test/$coverage")
-          ;;
-        all)
-          test_roots=(test)
-          ;;
+        core|long|stress|expensive|all) ;;
         *)
           echo "DTRACE_TEST_COVERAGE must be core, long, stress, expensive, or all" >&2
           exit 1
           ;;
       esac
+
+      test_roots=()
+      for suite in unittest internals demo smoke stress expensive; do
+        [[ -d "test/$suite" ]] && test_roots+=("test/$suite")
+      done
 
       mapfile -t candidates < <(
         find "''${test_roots[@]}" -type f \
@@ -99,18 +93,35 @@ pkgs.writeShellApplication {
       selected_tests=()
       for test_case in "''${candidates[@]}"; do
         declared_timeout=$(sed -nE 's/.*@@timeout:[[:space:]]*([0-9]+).*/\1/p' "$test_case" | head -n1)
+        declared_coverage=$(sed -nE 's/.*@@nix-coverage:[[:space:]]*([a-z]+).*/\1/p' "$test_case" | head -n1)
+
+        if [[ -n "$declared_coverage" ]]; then
+          case "$declared_coverage" in
+            core|long|stress|expensive) ;;
+            *)
+              echo "$test_case declares invalid Nix coverage: $declared_coverage" >&2
+              exit 1
+              ;;
+          esac
+          test_coverage=$declared_coverage
+        else
+          case "$test_case" in
+            test/stress/*) test_coverage=stress ;;
+            test/expensive/*) test_coverage=expensive ;;
+            *)
+              test_coverage=core
+              if [[ -n "$declared_timeout" ]] && (( declared_timeout > long_cutoff )); then
+                test_coverage=long
+              fi
+              ;;
+          esac
+        fi
+
         case "$coverage" in
-          core)
-            if [[ -z "$declared_timeout" ]] || (( declared_timeout <= long_cutoff )); then
-              selected_tests+=("$test_case")
-            fi
+          all)
+            selected_tests+=("$test_case")
             ;;
-          long)
-            if [[ -n "$declared_timeout" ]] && (( declared_timeout > long_cutoff )); then
-              selected_tests+=("$test_case")
-            fi
-            ;;
-          *)
+          "$test_coverage")
             selected_tests+=("$test_case")
             ;;
         esac

@@ -18,6 +18,7 @@
   libpfm,
   linuxHeaders,
   systemdLibs,
+  wireshark-cli,
   zlib,
 }:
 
@@ -138,6 +139,16 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail \
         'static const char *_dtrace_defld = "ld";' \
         'static const char *_dtrace_defld = "${binutils-unwrapped}/bin/ld";'
+    # dt_pcap deliberately sanitizes the environment before dropping
+    # privileges, so its FHS-only PATH cannot find a tshark supplied through a
+    # Nix profile.  Use the packaged executable for both discovery and exec.
+    substituteInPlace libdtrace/dt_pcap.c \
+      --replace-fail \
+        'status = system("tshark -v >/dev/null 2>&1");' \
+        'status = system("${wireshark-cli}/bin/tshark -v >/dev/null 2>&1");' \
+      --replace-fail \
+        'execlp("tshark", "tshark", "-l", "-i", "-", NULL);' \
+        'execl("${wireshark-cli}/bin/tshark", "tshark", "-l", "-i", "-", NULL);'
     substituteInPlace test/triggers/Build \
       --replace-fail \
         'visible-constructor visible-constructor-static visible-constructor-static-unstripped' \

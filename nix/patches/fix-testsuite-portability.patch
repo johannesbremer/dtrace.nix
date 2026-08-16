@@ -29,6 +29,115 @@ golden output, record the lockstat probes available on current aarch64 kernels,
 and make the runtime lookup of the USDT test's temporary shared libraries
 explicit.
 
+The module-clause listing test stops reading as soon as it sees one matching
+probe.  DTrace can still have buffered listing output at that point, producing
+an EPIPE diagnostic that contaminates the expected output.  Consume the full
+listing while reporting only the first match.
+
+The I/O argument checker finds device numbers by parsing every line from
+"ls -l /dev" whose final field matches a statname.  A conventional
+"/dev/cdrom -> sr0" symlink therefore matches alongside /dev/sr0, and its
+date fields are mistaken for major and minor numbers.  Query the exact device
+node with stat instead; this is independent of directory contents, locale and
+timestamp formatting.
+
+The scalar-reference test qualifies ext4_dir_operations with the ext4 module
+name, but NixOS builds ext4 into vmlinux.  Leave that lookup unqualified so it
+works in either kernel layout; the separately qualified isofs lookup continues
+to exercise module-scoped resolution.
+
+The xioctl and specopen flow-indentation demos intentionally attach to every
+FBT probe so they can show a complete call graph.  The ustack depth test
+similarly enables every entry and return in a process while collecting
+100-frame stacks.  On contemporary systems these are multi-gigabyte
+scalability workloads, not core smoke tests.  Preserve their semantics and
+declare them as stress coverage for the Nix test runner.
+
+diff --git a/test/unittest/io/check_io_probe_args.sh b/test/unittest/io/check_io_probe_args.sh
+--- a/test/unittest/io/check_io_probe_args.sh
++++ b/test/unittest/io/check_io_probe_args.sh
+@@ -179,15 +179,13 @@ fi
+ 
+ rm -f statname.txt
+ gawk 'NF == 23 { print $16, $17, $22 }' $infile | sort | uniq > statname.txt
+ while read mymajor myminor mystatname; do
+-    read mymajor0 myminor0 <<< $(ls -l /dev | gawk '$NF == "'$mystatname'" { print $(NF-5), $(NF-4) }' | tr ',' ' ')
+-
+-    if [ "x$mymajor0" == "x" ]; then
+-        mymajor0="0"
+-    fi
+-    if [ "x$myminor0" == "x" ]; then
+-        myminor0="0"
++    if [ -e "/dev/$mystatname" ]; then
++        read mymajor0 myminor0 <<< $(stat -Lc '%Hr %Lr' -- "/dev/$mystatname")
++    else
++        mymajor0=0
++        myminor0=0
+     fi
+ 
+     if [ $mymajor != $mymajor0 -o $myminor != $myminor0 ]; then
+
+diff --git a/test/unittest/scalars/tst.misc.d b/test/unittest/scalars/tst.misc.d
+--- a/test/unittest/scalars/tst.misc.d
++++ b/test/unittest/scalars/tst.misc.d
+@@ -20,7 +20,7 @@ BEGIN
+ {
+ 	printf("\nr_cpu_ids = 0x%x\n", `nr_cpu_ids);
+-	printf("ext4`ext4_dir_operations = %p\n", &ext4`ext4_dir_operations);
++	printf("ext4_dir_operations = %p\n", &`ext4_dir_operations);
+ 	printf("isofs`isofs_dir_operations = %p\n", &isofs`isofs_dir_operations);
+ 	printf("vmlinux`major_names = %p\n", &vmlinux`major_names);
+ 	x = 123;
+
+diff --git a/test/demo/fbt/xioctl.d b/test/demo/fbt/xioctl.d
+--- a/test/demo/fbt/xioctl.d
++++ b/test/demo/fbt/xioctl.d
+@@ -6,6 +6,7 @@
+  * Licensed under the Universal Permissive License v 1.0 as shown at
+  * http://oss.oracle.com/licenses/upl.
+  */
+ /* @@trigger: none */
++/* @@nix-coverage: stress */
+ 
+ /*
+  * To make the output more readable, we want to indent every function entry
+
+diff --git a/test/demo/spec/specopen.d b/test/demo/spec/specopen.d
+--- a/test/demo/spec/specopen.d
++++ b/test/demo/spec/specopen.d
+@@ -6,6 +6,8 @@
+  * http://oss.oracle.com/licenses/upl.
+  */
+ 
++/* @@nix-coverage: stress */
++
+ #pragma D option flowindent
+ 
+ syscall::openat:entry
+
+diff --git a/test/unittest/ustack/tst.depth.sh b/test/unittest/ustack/tst.depth.sh
+--- a/test/unittest/ustack/tst.depth.sh
++++ b/test/unittest/ustack/tst.depth.sh
+@@ -5,6 +5,7 @@
+ # Licensed under the Universal Permissive License v 1.0 as shown at
+ # http://oss.oracle.com/licenses/upl.
+ # @@xfail: dtv2
++# @@nix-coverage: stress
+ 
+ if [ $# != 1 ]; then
+
+diff --git a/test/unittest/dtrace-util/tst.ListProbesModuleClause.sh b/test/unittest/dtrace-util/tst.ListProbesModuleClause.sh
+--- a/test/unittest/dtrace-util/tst.ListProbesModuleClause.sh
++++ b/test/unittest/dtrace-util/tst.ListProbesModuleClause.sh
+@@ -18,6 +18,6 @@ dtrace=$1
+ ##
+ 
+ $dtrace $dt_flags -lm vmlinux'/probefunc == "read"/{printf("FOUND");}' \
+-| gawk 'NF == 5 && $3 == "vmlinux" { print "success"; exit }'
++| gawk 'NF == 5 && $3 == "vmlinux" && !found { print "success"; found = 1 }'
+ 
+ exit 0
+
 diff --git a/test/unittest/ip/tst.ipv6localicmp.sh b/test/unittest/ip/tst.ipv6localicmp.sh
 --- a/test/unittest/ip/tst.ipv6localicmp.sh
 +++ b/test/unittest/ip/tst.ipv6localicmp.sh
