@@ -1,0 +1,39 @@
+From: dtrace.nix maintainers
+Subject: io: track Linux changes to user-page BIO flags
+
+Linux removed BIO_USER_MAPPED in 5.10.  Treating its old bit number as live
+misreads unrelated modern flags, including BIO_TRACE_COMPLETION, and makes a
+BIO switch spuriously between B_PHYS and B_PAGEIO as it completes.
+
+Linux 6.5 added BIO_PAGE_PINNED for BIOs containing FOLL_PIN pages.  Use that
+flag on kernels which provide it, retain BIO_USER_MAPPED on older kernels, and
+do not invent a page-I/O classification in the interval where neither flag
+exists.
+
+diff --git a/libdtrace/io.d.in b/libdtrace/io.d.in
+--- a/libdtrace/io.d.in
++++ b/libdtrace/io.d.in
+@@ -58,9 +58,6 @@ translator bufinfo_t < struct buffer_head *B > {
+  * From linux/blk_types.h.
+  */
+ 
+-/* bit # in bi_flags */
+-inline int BIO_USER_MAPPED = 6;
+-
+ /* bit mask in bi_rw */
+ inline int REQ_WRITE = 0x01;
+ define_for_kernel([[REQ_SYNC_VAL]], [[(m4_kver(4,10,0), [[0x800]])]], [[0x10]])
+@@ -71,12 +68,13 @@ define_for_kernel([[__disk_chk]], [[(m4_kver(5,12,0), [[bi_bdev]]), (m4_kver(4,
+ define_for_kernel([[__bio_partno]], [[(m4_kver(6,10,0), [[bi_bdev->__bd_flags.counter & BD_PARTNO]]), (m4_kver(5,12,0), [[bi_bdev->bd_partno]]), (m4_kver(4,14,0), [[bi_partno]])]], [[bi_bdev->bd_part->partno]])
+ define_for_kernel([[__bio_part_dev]], [[(m4_kver(5,12,0), [[bi_bdev->bd_dev]]), (m4_kver(5,11,0), [[bi_disk->part_tbl->part[B->bi_partno]->bd_dev]]), (m4_kver(4,14,0), [[bi_disk->part_tbl->part[B->bi_partno]->__dev.devt]])]], [[bi_bdev->bd_part->__dev.devt]])
++define_for_kernel([[__bio_pageio]], [[(m4_kver(6,5,0), [[bi_flags & 1]]), (m4_kver(5,10,0), [[bi_flags & 0]])]], [[bi_flags & (1 << 6)]])
+ 
+ #pragma D binding "1.6.3" translator
+ translator bufinfo_t < struct bio *B > {
+ 	b_flags = ((int)B->__bi_rw & REQ_WRITE ? B_WRITE : B_READ) |
+ 		((int)B->__bi_rw & REQ_SYNC ? 0 : B_ASYNC) |
+-		((int)B->bi_flags & (1 << BIO_USER_MAPPED) ? B_PAGEIO : B_PHYS);
++		((int)B->__bio_pageio ? B_PAGEIO : B_PHYS);
+ 	b_addr = 0;
+ 	b_bcount = B->bi_iter.bi_size;
+ 	b_lblkno = B->bi_iter.bi_sector;

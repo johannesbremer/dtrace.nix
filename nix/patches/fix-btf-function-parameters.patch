@@ -1,0 +1,20 @@
+From: dtrace.nix maintainers
+Subject: libdtrace: convert every BTF function parameter
+
+The BTF function-prototype converter repeatedly converted the first
+parameter.  Kernel tracepoints have an initial void * context parameter, so
+this made all raw tracepoint arguments appear as void * even when BTF carried
+their real types.
+
+diff --git a/libdtrace/dt_btf.c b/libdtrace/dt_btf.c
+--- a/libdtrace/dt_btf.c
++++ b/libdtrace/dt_btf.c
+@@ -651,7 +651,7 @@ dt_btf_add_to_ctf(dtrace_hdl_t *dtp, dt_btf_t *btf, ctf_dict_t *ctf,
+ 			return CTF_ERR;
+ 
+ 		for (i = 0; i < vlen; i++) {
+-			argv[i] = dt_btf_add_to_ctf(dtp, btf, ctf, item->type);
++			argv[i] = dt_btf_add_to_ctf(dtp, btf, ctf, item[i].type);
+ 			if (argv[i] == CTF_ERR)
+ 				return CTF_ERR;
+ 		}

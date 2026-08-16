@@ -1,0 +1,288 @@
+From: dtrace.nix maintainers
+Subject: libproc: use the public glibc r_debug v2 namespace chain
+
+glibc 2.35 introduced r_debug protocol version 2.  Its public
+r_debug_extended structure links one r_debug record per loader namespace.
+Use that protocol directly instead of rejecting it and falling back to the
+base namespace.  Keep checking the protocol version after r_brk is cached,
+because glibc upgrades the base record from version 1 when it creates the
+first secondary namespace.
+
+Keep the private _rtld_global probing only for version 1, where the public ABI
+does not expose secondary namespaces.  Version 2 also reports consistency for
+every namespace through the normal debugger rendezvous, so it no longer needs
+the private loader-lock heuristic.
+
+diff --git a/libproc/rtld_db.c b/libproc/rtld_db.c
+--- a/libproc/rtld_db.c
++++ b/libproc/rtld_db.c
+@@ -244,26 +244,70 @@ find_dl_nns(rd_agent_t *rd)
+ 	return 0;
+ }
+ 
++/*
++ * Follow the public r_debug_extended chain introduced by glibc's version 2
++ * debugger protocol.  struct r_debug is the first member, so r_next follows
++ * it at the generated target-ABI size of struct r_debug.
++ */
++static uintptr_t
++next_ns_debug(rd_agent_t *rd, uintptr_t addr)
++{
++	uintptr_t next;
++	size_t r_debug_size = rd->P->elf64 ? R_DEBUG_64_SIZE :
++	    R_DEBUG_32_SIZE;
++	size_t ptr_size = rd->P->elf64 ? PTR_64_SIZE : PTR_32_SIZE;
++
++	if (Pread_scalar(rd->P, &next, ptr_size, sizeof(uintptr_t),
++		addr + r_debug_size) < 0) {
++		_dprintf("%i: Cannot read next namespace debug record\n",
++		    rd->P->pid);
++		return 0;
++	}
++
++	return next;
++}
++
+ /*
+  * Determine the number of currently-valid namespaces.
+  */
+ static size_t
+ dl_nns(rd_agent_t *rd)
+ {
+ 	size_t buf;
++	size_t nns;
++	uintptr_t addr;
+ 	int tried = 0;
+ 
+ 	/*
+ 	 * Non-shared processes always have one and only one namespace, as do
+ 	 * processes for which we have timed out attempting to get at a
+ 	 * consistent state for lmids >1, and those for which we can't get at
+ 	 * their internal state (e.g. those using C libraries other than glibc).
+ 	 */
+ 
+-	if ((rd->P->no_dyn) || (rd->lmid_incompatible_glibc) ||
+-	    rtld_global(rd) == 0)
++	if (rd->P->no_dyn)
+ 		return 1;
+ 
++	/*
++	 * Version 2 makes the namespace list part of the public debugger ABI.
++	 * Bound traversal by glibc's maximum namespace count so a corrupt child
++	 * cannot make us loop forever.
++	 */
++	if (rd->r_version >= 2) {
++		addr = r_debug(rd->P);
++		for (nns = 0; addr != 0 && nns < DL_NNS; nns++)
++			addr = next_ns_debug(rd, addr);
++
++		if (addr != 0)
++			_dprintf("%i: namespace debug chain exceeds DL_NNS\n",
++			    rd->P->pid);
++
++		return nns > 0 ? nns : 1;
++	}
++
++	if (rd->lmid_incompatible_glibc || rtld_global(rd) == 0)
++		return 1;
++
+ 	/*
+ 	 * Set up various offsets.  This is only a compile-time guesstimate and
+ 	 * may be recomputed by find_dl_nns, below.
+@@ -367,5 +409,6 @@ ns_debug_addr(rd_agent_t *rd, Lmid_t lmid)
+ {
+ 	uintptr_t global;
++	uintptr_t addr;
+ 
+ 	/*
+ 	 * The base lmid's r_debug comes from a different place, which is valid
+@@ -377,6 +420,14 @@ ns_debug_addr(rd_agent_t *rd, Lmid_t lmid)
+ 	if (lmid == LM_ID_BASE || rd->P->no_dyn)
+ 		return r_debug(rd->P);
+ 
++	if (rd->r_version >= 2) {
++		addr = r_debug(rd->P);
++		while (addr != 0 && lmid-- > 0)
++			addr = next_ns_debug(rd, addr);
++
++		return addr;
++	}
++
+ 	global = rtld_global(rd);
+ 	if (!global)
+ 		return 0;
+@@ -399,16 +452,16 @@ first_link_map(rd_agent_t *rd, Lmid_t lmid)
+ 	uintptr_t link_map_addr;
+ 	uintptr_t link_map_ptr_addr;
+ 
+ 	/*
+-	 * If this is the base lmid, we should get it from r_debug->r_map,
+-	 * to avoid difficulties finding rtld_global in statically linked
+-	 * processes.
++	 * The base lmid always comes from r_debug->r_map, to avoid difficulties
++	 * finding rtld_global in statically linked processes.  Version 2 makes
++	 * every namespace's r_map public in the r_debug_extended chain.
+ 	 */
+ 
+-	if (lmid == LM_ID_BASE) {
++	if (lmid == LM_ID_BASE || rd->r_version >= 2) {
+ 		if (read_scalar_child(rd->P, &link_map_addr,
+ 			ns_debug_addr(rd, lmid), r_debug_offsets, r_debug,
+ 			r_map) < 0)
+ 			return 0;
+ 		return link_map_addr;
+ 	}
+@@ -932,6 +987,7 @@ rd_ldso_consistency(rd_agent_t *rd, Lmid_t lmid)
+ {
+ 	int r_state = RD_CONSISTENT;
+ 	Lmid_t i;
++	size_t nns;
+ 
+ 	if (lmid > -1) {
+ 		uintptr_t lmid_addr = ns_debug_addr(rd, lmid);
+@@ -958,7 +1014,8 @@ rd_ldso_consistency(rd_agent_t *rd, Lmid_t lmid)
+ 		return r_state;
+ 	}
+ 
+-	for (i = 0; i < dl_nns(rd) && r_state == RD_CONSISTENT;
++	nns = dl_nns(rd);
++	for (i = 0; i < nns && r_state == RD_CONSISTENT;
+ 	     i++)
+ 		r_state = rd_ldso_consistency(rd, i);
+ 
+@@ -978,6 +1035,7 @@ static int
+ rd_ldso_consistent_begin(rd_agent_t *rd)
+ {
+ 	int err;
++	Lmid_t consistency_lmid = rd->r_version >= 2 ? -1 : LM_ID_BASE;
+ 
+ 	/*
+ 	 * If we are already inside a consistency-enforcement block, just note
+@@ -994,8 +1052,8 @@ rd_ldso_consistent_begin(rd_agent_t *rd)
+ 	 * state (in which case we cannot move into a consistent state without
+ 	 * causing trouble elsewhere).
+ 	 */
+ 	if ((rd->P->bkpt_halted) || (rd->P->state != PS_RUN)) {
+-		if (rd_ldso_consistency(rd, LM_ID_BASE) == RD_CONSISTENT)
++		if (rd_ldso_consistency(rd, consistency_lmid) == RD_CONSISTENT)
+ 			return 0;
+ 		else
+ 			return EDEADLK;
+@@ -1053 +1109 @@ rd_ldso_consistent_begin(rd_agent_t *rd)
+-	if (rd_ldso_consistency(rd, LM_ID_BASE) != RD_CONSISTENT) {
++	if (rd_ldso_consistency(rd, consistency_lmid) != RD_CONSISTENT) {
+@@ -1065,7 +1123,7 @@ rd_ldso_consistent_begin(rd_agent_t *rd)
+ 		Pwait(rd->P, FALSE, NULL);
+ 		while (!rd->ic_transitioned && (rd->P->state == PS_RUN ||
+ 			rd->P->group_stopped) &&
+-		    rd_ldso_consistency(rd, LM_ID_BASE) != RD_CONSISTENT)
++		    rd_ldso_consistency(rd, consistency_lmid) != RD_CONSISTENT)
+ 			Pwait(rd->P, TRUE, NULL);
+ 
+ 		rd->stop_on_consistent = 0;
+@@ -1124,6 +1182,13 @@ rd_ldso_nonzero_lmid_consistent_begin(rd_agent_t *rd)
+ {
+ 	long long timeout_nsec;
+ 
++	/*
++	 * Version 2 reports every namespace's state through r_debug_extended.
++	 * rd_ldso_consistent_begin() therefore already covers all namespaces.
++	 */
++	if (rd->r_version >= 2)
++		return 0;
++
+ 	/*
+ 	 * If we are already stopped at a breakpoint or otherwise in tracing
+ 	 * stop, do nothing.  Return success, unless we are in an inconsistent
+@@ -1277,4 +1343,7 @@ static void rd_ldso_nonzero_lmid_consistent_end(rd_agent_t *rd)
+ {
++	if (rd->r_version >= 2)
++		return;
++
+ 	if (rd->lmid_halted)
+ 		Puntrace(rd->P, 0);
+ 	else if (rd->lmid_bkpted)
+@@ -1388,9 +1457,6 @@ r_brk(rd_agent_t *rd)
+ 	if (rd->released)
+ 		return 0;
+ 
+-	if (rd->r_brk_addr)
+-		return rd->r_brk_addr;
+-
+ 	r_debug_addr = r_debug(rd->P);
+ 
+ 	/*
+@@ -1405,7 +1471,7 @@ r_brk(rd_agent_t *rd)
+ 	 */
+ 	if ((read_scalar_child(rd->P, &rd->r_version, r_debug_addr,
+ 		    r_debug_offsets, r_debug, r_version) <= 0) ||
+-	    (rd->r_version > 1)) {
++	    (rd->r_version > 2)) {
+ 		if (!warned)
+ 			_dprintf("%i: r_version %i unsupported.\n",
+ 			    rd->P->pid, rd->r_version);
+@@ -1418,6 +1484,9 @@ r_brk(rd_agent_t *rd)
+ 	if (rd->r_version == 0)
+ 		return 0;
+ 
++	if (rd->r_brk_addr)
++		return rd->r_brk_addr;
++
+ 	/*
+ 	 * Get the address of the r_brk dynamic linker breakpoint.
+ 	 */
+@@ -1465,7 +1534,8 @@ rd_start_trap(uintptr_t addr, void *rd_data)
+ 		goto done;
+ 	}
+ 
+-	if (!rd->P->no_dyn && rtld_global(rd) == 0) {
++	if (rd->r_version < 2 && !rd->P->no_dyn &&
++	    rtld_global(rd) == 0) {
+ 		_dprintf("%i: Cannot determine dynamic linker global map "
+ 		    "address.\n", rd->P->pid);
+ 		goto done;
+@@ -1548,12 +1618,14 @@ rd_new(struct ps_prochandle *P)
+ 	if (r_debug_addr != 0 &&
+ 	    ((read_scalar_child(rd->P, &r_version, r_debug_addr,
+ 		    r_debug_offsets, r_debug, r_version) <= 0) ||
+-		(r_version > 1))) {
++		(r_version > 2))) {
+ 		_dprintf("%i: r_version %i unsupported.\n", rd->P->pid,
+ 		    r_version);
+ 		goto err;
+ 	}
+ 
++	rd->r_version = r_version;
++
+ 	/*
+ 	 * If the dynamic linker is initialized, get the address of the r_brk
+ 	 * dynamic linker breakpoint, and of the rtld_global structure.  (We
+@@ -1570,7 +1642,8 @@ rd_new(struct ps_prochandle *P)
+ 			    "breakpoint address.\n", rd->P->pid);
+ 			goto err;
+ 		}
+-		if (!P->no_dyn && rtld_global(rd) == 0) {
++		if (rd->r_version < 2 && !P->no_dyn &&
++		    rtld_global(rd) == 0) {
+ 			_dprintf("%i: Cannot determine dynamic linker "
+ 			    "global map address.\n", rd->P->pid);
+ 		}
+@@ -1809,7 +1882,7 @@ rd_loadobj_iter(rd_agent_t *rd, rl_iter_f *fun, void *state)
+ 				goto err;
+ 		}
+ 
+-		if (lmid > 0) {
++		if (lmid > 0 && rd->r_version < 2) {
+ 			nloaded = ns_nloaded(rd, lmid);
+ 			_dprintf("%i: %i objects in LMID %li\n", rd->P->pid,
+ 			    nloaded, lmid);
+@@ -1837,7 +1910,8 @@ rd_loadobj_iter(rd_agent_t *rd, rl_iter_f *fun, void *state)
+ 		}
+ 
+ 		while ((loadobj != 0) &&
+-		    (lmid == 0 || (lmid > 0 && n < nloaded))) {
++		    (lmid == 0 || rd->r_version >= 2 ||
++		    (lmid > 0 && n < nloaded))) {
+ 			struct link_map map;
+ 			uintptr_t *real_scope = NULL;
+ 			unsigned int real_nscopes;

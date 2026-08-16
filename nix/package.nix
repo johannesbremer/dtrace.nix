@@ -40,6 +40,9 @@ stdenv.mkDerivation (finalAttrs: {
     ./patches/fix-pid-pie-offset-probes.patch
     ./patches/fix-dtprobed-map-files.patch
     ./patches/authorize-effective-root.patch
+    ./patches/fix-btf-function-parameters.patch
+    ./patches/fix-modern-bio-page-flags.patch
+    ./patches/support-glibc-r-debug-v2.patch
   ];
 
   nativeBuildInputs = [
@@ -89,6 +92,35 @@ stdenv.mkDerivation (finalAttrs: {
   makeFlags = [ "SHELL=${bash}/bin/bash" ];
 
   postPatch = ''
+    # Upstream ships io.d.in alongside pre-generated translators for each
+    # supported architecture and kernel series.  Builds without a kernel
+    # source tree install those generated files, so keep them in sync with
+    # fix-modern-bio-page-flags.patch.
+    for ioD in dlibs/*/*/io.d; do
+      kernelSeries=$(basename "$(dirname "$ioD")")
+      case "$kernelSeries" in
+        5.2|5.6)
+          pageIo='((int)B->bi_flags & (1 << 6) ? B_PAGEIO : B_PHYS);'
+          ;;
+        5.11|5.12|5.14|5.16|6.1)
+          pageIo='((int)B->bi_flags & 0 ? B_PAGEIO : B_PHYS);'
+          ;;
+        6.10)
+          pageIo='((int)B->bi_flags & 1 ? B_PAGEIO : B_PHYS);'
+          ;;
+        *)
+          echo "Unsupported pre-generated io.d kernel series: $kernelSeries" >&2
+          exit 1
+          ;;
+      esac
+
+      substituteInPlace "$ioD" \
+        --replace-fail $'/* bit # in bi_flags */\ninline int BIO_USER_MAPPED = 6;\n\n' "" \
+        --replace-fail \
+          '((int)B->bi_flags & (1 << BIO_USER_MAPPED) ? B_PAGEIO : B_PHYS);' \
+          "$pageIo"
+    done
+
     patchShebangs configure include libdtrace libproc test runtest.sh
     substituteInPlace GNUmakefile \
       --replace-fail 'SHELL = /bin/bash' 'SHELL = ${bash}/bin/bash'
@@ -112,7 +144,7 @@ stdenv.mkDerivation (finalAttrs: {
         'visible-constructor' \
       --replace-fail \
         '-Wl,-rpath test/triggers' \
-        "-Wl,-rpath,'\$\$ORIGIN'"
+        "-Wl,-rpath,'\$\$\$\$ORIGIN'"
     substituteInPlace test/triggers/pid-tst-gcc.c \
       --replace-fail /bin/ls ${coreutils}/bin/ls
   '';
