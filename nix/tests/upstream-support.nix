@@ -14,6 +14,7 @@
     pkgs.gnumake
     pkgs.gnused
     pkgs.iproute2
+    pkgs.iputils
     pkgs.jdk
     pkgs.netcat-openbsd
     pkgs.nfs-utils

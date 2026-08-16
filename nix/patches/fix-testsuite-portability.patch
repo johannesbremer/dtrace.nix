@@ -1,5 +1,5 @@
 From: dtrace.nix maintainers
-Subject: tests: fix portable postprocessing and disassembly synchronization
+Subject: tests: adapt upstream tests to the NixOS execution environment
 
 The postprocessors intend to remove a symbol offset beginning with "+0x".
 An unescaped leading plus is not a valid extended regular expression in
@@ -19,6 +19,83 @@ vfs_read, which the DTrace consumer itself exercises, and its rw_verify_area
 call.  This also ports the tail-call case away from the obsolete ioctl symbol.
 Use a global readiness flag where the selected probe is independent of the
 thread that delivered tick-1.
+
+NixOS provides the iputils IPv6 implementation as `ping -6`, rather than the
+legacy `ping6` alias.  Current kernels also expose the task_rename tracepoint's
+pid argument, shifting the arguments asserted by the SDT test.
+
+Keep cleanup diagnostics from a successfully completed NFS trace out of the
+golden output, record the lockstat probes available on current aarch64 kernels,
+and make the runtime lookup of the USDT test's temporary shared libraries
+explicit.
+
+diff --git a/test/unittest/ip/tst.ipv6localicmp.sh b/test/unittest/ip/tst.ipv6localicmp.sh
+--- a/test/unittest/ip/tst.ipv6localicmp.sh
++++ b/test/unittest/ip/tst.ipv6localicmp.sh
+@@ -29,7 +29,7 @@ local=::1
+ # Check that we have an IPv6 local configuration to work with, or expect fail
+ /sbin/ip -o route get to $local > /dev/null || exit 67
+ 
+-$dtrace $dt_flags -c "ping6 -q $local -c 3" -qs /dev/stdin <<EOF | \
++$dtrace $dt_flags -c "ping -6 -q $local -c 3" -qs /dev/stdin <<EOF | \
+     gawk '/ip::/ { print $0 }' | sort -n
+ ip:::send
+ /args[2]->ip_saddr == "$local" && args[2]->ip_daddr == "$local" &&
+diff --git a/test/unittest/sdt/tst.args-3.d b/test/unittest/sdt/tst.args-3.d
+--- a/test/unittest/sdt/tst.args-3.d
++++ b/test/unittest/sdt/tst.args-3.d
+@@ -23,5 +23,6 @@ BEGIN
+  * The 'task_rename' tracepoint passes the following arguments:
+  *
++ *	pid_t	pid
+  *	char	oldcomm[16]
+  *	char	newcomm[16]
+  *	short	oom_score_adj
+@@ -33,7 +34,7 @@ this bool done;
+ 
+ sdt:task::task_rename
+ {
+-	printf("PID OK, oldcomm [%s], newcomm [%s], oom_score_adj %hd\n", stringof(args[0]), stringof(args[1]), args[2]);
++	printf("PID OK, oldcomm [%s], newcomm [%s], oom_score_adj %hd\n", stringof(args[1]), stringof(args[2]), args[3]);
+ 	exit(0);
+ }
+ 
+diff --git a/test/unittest/io/tst.nfs.sh b/test/unittest/io/tst.nfs.sh
+--- a/test/unittest/io/tst.nfs.sh
++++ b/test/unittest/io/tst.nfs.sh
+@@ -19,6 +19,6 @@ tempfile=`mktemp -u -p $clientpath`
+ statname="nfs"
+ 
+-trap "rm -f $tempfile; umount $clientpath; rmdir $clientpath; exportfs -u 127.0.0.1:$serverpath; rmdir $serverpath" QUIT EXIT
++trap "rm -f $tempfile; umount $clientpath; rmdir $clientpath; exportfs -u 127.0.0.1:$serverpath > /dev/null 2>&1 || true; rmdir $serverpath" QUIT EXIT
+ 
+ # setup NFS server
+ #service nfs start > /dev/null 2>&1
+diff --git a/test/unittest/lockstat/tst.lockstat-summary.aarch64.r b/test/unittest/lockstat/tst.lockstat-summary.aarch64.r
+--- a/test/unittest/lockstat/tst.lockstat-summary.aarch64.r
++++ b/test/unittest/lockstat/tst.lockstat-summary.aarch64.r
+@@ -8,2 +8,2 @@
+-lockstat:::rw-acquire - no
+-lockstat:::rw-release - no
++lockstat:::rw-acquire - yes
++lockstat:::rw-release - yes
+@@ -11,2 +11,2 @@
+-lockstat:::spin-acquire - no
+-lockstat:::spin-release - no
++lockstat:::spin-acquire - yes
++lockstat:::spin-release - yes
+diff --git a/test/unittest/usdt/tst.multiprov-dupprobe-shlibs.sh b/test/unittest/usdt/tst.multiprov-dupprobe-shlibs.sh
+--- a/test/unittest/usdt/tst.multiprov-dupprobe-shlibs.sh
++++ b/test/unittest/usdt/tst.multiprov-dupprobe-shlibs.sh
+@@ -95,7 +95,7 @@ fi
+ # Run DTrace.
+ #
+ 
+-$dtrace $dt_flags -c ./main -qn '
++LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" $dtrace $dt_flags -c ./main -qn '
+ /* report the target pid for post processing */
+ BEGIN
+ {
 
 diff --git a/test/unittest/stack/tst.stack_fbt.sh b/test/unittest/stack/tst.stack_fbt.sh
 index 6275646c..ef5a56ea 100755
