@@ -36,6 +36,49 @@
           overlays = [ self.overlays.default ];
         }
       );
+      executionProfiles = import ./nix/tests/execution-profiles.nix;
+      ciExecutionProfiles = {
+        x86_64-linux = executionProfiles.accelerated;
+        aarch64-linux = executionProfiles.emulated;
+      };
+      upstreamCoverages = [
+        "core"
+        "long"
+        "stress"
+      ];
+      mkCiTestMatrix = system: {
+        include = nixpkgs.lib.concatMap (
+          coverage:
+          let
+            shardCount = ciExecutionProfiles.${system}.shardCounts.${coverage};
+          in
+          map (shardIndex: {
+            inherit coverage;
+            shard = shardIndex + 1;
+            shards = shardCount;
+          }) (nixpkgs.lib.range 0 (shardCount - 1))
+        ) upstreamCoverages;
+      };
+      mkLimaConfiguration =
+        {
+          system,
+          upstreamTesting ? false,
+          persistent ? true,
+        }:
+        nixpkgs.lib.nixosSystem {
+          inherit system;
+          specialArgs = { inherit self; };
+          modules = [
+            nixos-lima.nixosModules.lima
+            self.nixosModules.default
+            (import ./nix/hosts/lima.nix { inherit persistent; })
+          ]
+          ++ nixpkgs.lib.optional upstreamTesting (
+            import ./nix/tests/upstream-host.nix {
+              upstreamTest = self.packages.${system}.upstream-test;
+            }
+          );
+        };
     in
     {
       overlays.default = final: _prev: {
@@ -43,25 +86,68 @@
         dtrace-bpf-gcc = final.callPackage ./nix/bpf-gcc.nix {
           bpf-binutils = final.dtrace-bpf-binutils;
         };
-        oracle-dtrace = final.callPackage ./nix/package.nix {
-          src = dtrace-src;
-          bpf-binutils = final.dtrace-bpf-binutils;
-          bpf-gcc = final.dtrace-bpf-gcc;
-        };
+        oracle-dtrace =
+          let
+            package =
+              (final.callPackage ./nix/package.nix {
+                src = dtrace-src;
+                bpf-binutils = final.dtrace-bpf-binutils;
+                bpf-gcc = final.dtrace-bpf-gcc;
+              }).overrideAttrs
+                (oldAttrs: {
+                  passthru = (oldAttrs.passthru or { }) // {
+                    tests = (oldAttrs.passthru.tests or { }) // {
+                      usdt-fixture = final.callPackage ./nix/tests/usdt-fixture.nix {
+                        dtracePackage = package;
+                      };
+                    };
+                  };
+                });
+          in
+          package;
       };
 
       packages = forAllSystems (
         system:
         let
           pkgs = pkgsFor.${system};
+          dtracePackage = pkgs.oracle-dtrace;
+          testsuite = import ./nix/tests/testsuite.nix {
+            inherit pkgs dtracePackage;
+          };
+          upstreamTest = import ./nix/tests/direct.nix {
+            inherit pkgs dtracePackage testsuite;
+          };
+          limaTestConfiguration = mkLimaConfiguration {
+            inherit system;
+            upstreamTesting = true;
+            persistent = false;
+          };
         in
         {
-          default = pkgs.oracle-dtrace;
+          default = dtracePackage;
           inherit (pkgs) oracle-dtrace dtrace-bpf-binutils dtrace-bpf-gcc;
-          upstream-test = import ./nix/tests/direct.nix {
-            inherit pkgs;
-            dtracePackage = pkgs.oracle-dtrace;
-          };
+          lima-test-iso = limaTestConfiguration.config.system.build.images.iso;
+          upstream-test = upstreamTest;
+          upstream-testsuite = testsuite;
+          upstream-test-closure = pkgs.linkFarm "oracle-dtrace-upstream-test-closure" [
+            {
+              name = "dtrace";
+              path = dtracePackage;
+            }
+            {
+              name = "runner";
+              path = upstreamTest;
+            }
+            {
+              name = "testsuite";
+              path = testsuite;
+            }
+            {
+              name = "usdt-fixture";
+              path = dtracePackage.tests.usdt-fixture;
+            }
+          ];
         }
       );
 
@@ -69,40 +155,52 @@
         upstream-test = {
           type = "app";
           program = "${self.packages.${system}.upstream-test}/bin/dtrace-upstream-test";
-          meta.description = "Run Oracle DTrace's upstream Linux test suite";
+          meta.description = "Run an explicitly selected Oracle DTrace upstream coverage class";
         };
       });
+
+      lib.ciTestMatrix = forAllSystems mkCiTestMatrix;
 
       nixosModules.default = import ./nix/module.nix { inherit self; };
       nixosModules.dtrace = self.nixosModules.default;
 
-      nixosConfigurations.dtrace-lima-x86 = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        specialArgs = { inherit self; };
-        modules = [
-          nixos-lima.nixosModules.lima
-          self.nixosModules.default
-          ./nix/hosts/lima-x86.nix
-        ];
+      nixosConfigurations = {
+        dtrace-lima-arm = mkLimaConfiguration { system = "aarch64-linux"; };
+        dtrace-lima-x86 = mkLimaConfiguration { system = "x86_64-linux"; };
       };
 
       checks = forAllSystems (
         system:
         let
           pkgs = pkgsFor.${system};
-          upstreamShardCount = if system == "x86_64-linux" then 4 else 16;
-          upstreamShards = builtins.listToAttrs (
-            map (shardIndex: {
-              name = "upstream-${toString (shardIndex + 1)}";
-              value = import ./nix/tests/upstream.nix {
-                inherit pkgs self shardIndex;
-                shardCount = upstreamShardCount;
-              };
-            }) (nixpkgs.lib.range 0 (upstreamShardCount - 1))
-          );
+          executionProfile = ciExecutionProfiles.${system};
+          mkCoverageShards =
+            coverage:
+            let
+              shardCount = executionProfile.shardCounts.${coverage};
+            in
+            builtins.listToAttrs (
+              map (shardIndex: {
+                name = "upstream-${coverage}-${toString (shardIndex + 1)}";
+                value = import ./nix/tests/upstream.nix {
+                  inherit
+                    pkgs
+                    self
+                    executionProfile
+                    coverage
+                    shardIndex
+                    shardCount
+                    ;
+                };
+              }) (nixpkgs.lib.range 0 (shardCount - 1))
+            );
+          upstreamShards = nixpkgs.lib.foldl' (
+            acc: coverage: acc // mkCoverageShards coverage
+          ) { } upstreamCoverages;
         in
         {
           package = pkgs.oracle-dtrace;
+          package-usdt-fixture = pkgs.oracle-dtrace.tests.usdt-fixture;
           vm = import ./nix/tests/vm.nix {
             inherit pkgs self;
           };

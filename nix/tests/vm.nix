@@ -2,34 +2,7 @@
 
 let
   dtracePackage = self.packages.${pkgs.stdenv.hostPlatform.system}.oracle-dtrace;
-  usdtProvider = pkgs.writeText "nixos-port.d" ''
-    provider nixos_port {
-      probe fire();
-    };
-  '';
-  usdtSource = pkgs.writeText "nixos-port.c" ''
-    #include <sys/sdt.h>
-    #include <unistd.h>
-
-    static void fire(void)
-    {
-      DTRACE_PROBE(nixos_port, fire);
-    }
-
-    int main(int argc, char **argv)
-    {
-      if (argc > 1) {
-        (void)argv;
-        for (;;) {
-          sleep(1);
-          fire();
-        }
-      }
-
-      fire();
-      return 0;
-    }
-  '';
+  usdtFixture = dtracePackage.tests.usdt-fixture;
 in
 
 pkgs.testers.runNixOSTest {
@@ -66,18 +39,12 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test $(stat -c %U:%G:%a /run/wrappers/bin/dtrace) = root:dtrace:4550")
     machine.succeed("id -nG tracer | grep -qw dtrace")
     machine.fail("runuser -u outsider -- /run/wrappers/bin/dtrace -l")
-    machine.succeed("dtrace -V 2>&1 | grep -F 'dtrace: D 2.0.7'")
+    machine.succeed("dtrace -V 2>&1 | grep -F 'dtrace: D ${dtracePackage.version}'")
     machine.succeed("dtrace -l -n dtrace:::BEGIN")
     output = machine.succeed(
       "dtrace -q -n 'BEGIN { trace(\"nixos-dtrace-ok\"); exit(0); }'"
     )
     assert "nixos-dtrace-ok" in output
-
-    machine.succeed(
-      "PATH=/no-such-path ${dtracePackage}/bin/dtrace -C -h "
-      "-s ${usdtProvider} -o /tmp/nixos-port.h"
-    )
-    machine.succeed("test -s /tmp/nixos-port.h")
 
     output = machine.succeed(
       "runuser -u tracer -- /run/wrappers/bin/dtrace -q "
@@ -100,21 +67,8 @@ pkgs.testers.runNixOSTest {
     )
     assert "nixos-syscall-ok" in output
 
-    machine.succeed(
-      "${pkgs.stdenv.cc}/bin/cc -x c -std=gnu99 "
-      "-I${dtracePackage}/lib/dtrace/include "
-      "-c ${usdtSource} -o /tmp/nixos-port.o"
-    )
-    machine.succeed(
-      "dtrace -G -s ${usdtProvider} /tmp/nixos-port.o "
-      "-o /tmp/nixos-port-prov.o"
-    )
-    machine.succeed(
-      "${pkgs.stdenv.cc}/bin/cc /tmp/nixos-port.o "
-      "/tmp/nixos-port-prov.o -o /tmp/nixos-port"
-    )
     output = machine.succeed(
-      "dtrace -q -c /tmp/nixos-port "
+      "dtrace -q -c ${usdtFixture}/bin/nixos-port "
       "-n 'nixos_port$target:::fire "
       "{ trace(\"nixos-usdt-ok\"); exit(0); }'"
     )
@@ -122,7 +76,7 @@ pkgs.testers.runNixOSTest {
 
     machine.succeed(
       "systemd-run --unit=nixos-port-outsider --property=User=outsider "
-      "/tmp/nixos-port wait"
+      "${usdtFixture}/bin/nixos-port wait"
     )
     machine.wait_for_unit("nixos-port-outsider.service")
     outsider_pid = machine.succeed(

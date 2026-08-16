@@ -4,6 +4,7 @@
   binutils-unwrapped,
   bison,
   flex,
+  perl,
   texinfo,
   zlib,
 }:
@@ -11,12 +12,14 @@
 stdenv.mkDerivation (finalAttrs: {
   pname = "dtrace-bpf-binutils";
   inherit (binutils-unwrapped) version src;
+  strictDeps = true;
 
   patches = binutils-unwrapped.patches or [ ];
 
   nativeBuildInputs = [
     bison
     flex
+    perl
     texinfo
   ];
 

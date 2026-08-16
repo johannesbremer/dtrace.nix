@@ -1,27 +1,23 @@
 {
+  persistent ? true,
+}:
+
+{
   lib,
   modulesPath,
   pkgs,
-  self,
   ...
 }:
-
-let
-  support = import ../tests/upstream-support.nix { inherit pkgs; };
-in
 
 {
   imports = [ (modulesPath + "/profiles/qemu-guest.nix") ];
 
-  networking.hostName = "dtrace-nixos-x86";
+  networking.hostName = "dtrace-nixos-${pkgs.stdenv.hostPlatform.parsed.cpu.name}";
 
   services.lima.enable = true;
   services.openssh.enable = true;
 
   programs.dtrace.enable = true;
-
-  environment.systemPackages = [ self.packages.x86_64-linux.upstream-test ];
-  systemd.tmpfiles.rules = support.usrBinLinks;
 
   nix.settings.experimental-features = [
     "nix-command"
@@ -30,16 +26,13 @@ in
 
   security.sudo.wheelNeedsPassword = false;
 
-  boot = {
-    kernelPackages = pkgs.linuxPackages_latest;
-    loader.grub = {
-      device = "nodev";
-      efiSupport = true;
-      efiInstallAsRemovable = true;
-    };
+  boot.loader.grub = lib.mkIf persistent {
+    device = "nodev";
+    efiSupport = true;
+    efiInstallAsRemovable = true;
   };
 
-  fileSystems = {
+  fileSystems = lib.mkIf persistent {
     "/boot" = {
       device = lib.mkForce "/dev/vda1";
       fsType = "vfat";

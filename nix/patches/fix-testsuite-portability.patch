@@ -1,10 +1,24 @@
 From: dtrace.nix maintainers
-Subject: tests: quote literal plus signs for modern awk
+Subject: tests: fix portable postprocessing and disassembly synchronization
 
 The postprocessors intend to remove a symbol offset beginning with "+0x".
 An unescaped leading plus is not a valid extended regular expression in
 modern gawk, so the postprocessor itself fails before it can assess DTrace's
 output.
+
+The trampoline annotation test relies on BEGIN to terminate DTrace.  BEGIN can
+fire before the later io trampoline has been emitted under slow emulation.  Use
+the -c synchronization point instead: DTrace starts the child only after probe
+enablement is complete, then exits when the child terminates.
+
+The FBT stress tests intend to check entry and return arguments and a nested
+call, but their empty function fields attach to every FBT probe in the kernel.
+Contemporary generic kernels expose more than 150,000 such probes, turning
+functional checks into accidental multi-gigabyte scalability tests.  Trace
+vfs_read, which the DTrace consumer itself exercises, and its rw_verify_area
+call.  This also ports the tail-call case away from the obsolete ioctl symbol.
+Use a global readiness flag where the selected probe is independent of the
+thread that delivered tick-1.
 
 diff --git a/test/unittest/stack/tst.stack_fbt.sh b/test/unittest/stack/tst.stack_fbt.sh
 index 6275646c..ef5a56ea 100755
@@ -31,3 +45,131 @@ index 8499852a..5527a610 100755
  
  	# Finally, get the sym(caller) output.
  	if (getline != 1) { print "ERROR: missing expected output"; exit(1); }
+
+diff --git a/test/unittest/disasm/tst.ann-tramp-lvar.sh b/test/unittest/disasm/tst.ann-tramp-lvar.sh
+--- a/test/unittest/disasm/tst.ann-tramp-lvar.sh
++++ b/test/unittest/disasm/tst.ann-tramp-lvar.sh
+@@ -7,21 +7,37 @@
+ #
+ 
+ dtrace=$1
++raw=$tmpdir/ann-tramp-lvar.raw
+ 
+-$dtrace $dt_flags -xdisasm=2 -Sn '
+-BEGIN,
++if ! $dtrace $dt_flags -xdisasm=2 -Sn '
++proc:::exit,
+ io:::start
++/pid == $target/
+ {
+ 	exit(0);
+ }
+-' 2>&1 | gawk '/this->/ {
++' -c /bin/true >"$raw" 2>&1; then
++	cat "$raw"
++	exit 1
++fi
++
++if ! gawk '/this->/ {
+ 		sub(/^[^:]+: /, "");
+ 
+ 		gsub(/%r[0-9]/, "%rX");
+ 		$2 = "N";
+ 		$3 = "N";
+ 
++		found = 1;
+ 		print;
+-         }'
++         }
++
++         END {
++		if (!found)
++			exit 1;
++         }' "$raw"; then
++	cat "$raw"
++	exit 1
++fi
+ 
+-exit $?
++exit 0
+diff --git a/test/stress/fbtprovider/tst.basic.d b/test/stress/fbtprovider/tst.basic.d
+--- a/test/stress/fbtprovider/tst.basic.d
++++ b/test/stress/fbtprovider/tst.basic.d
+@@ -13,11 +13,11 @@
+ 
+ tick-1
+ {
+-	self->traceme = 1;
++	traceme = 1;
+ }
+ 
+-fbt:::
+-/self->traceme/
++fbt::vfs_read:entry
++/traceme/
+ {
+ 	printf("The arguments are %u %u %u %u %u %u %u %u %u\n", arg0, arg1,
+ 	       arg2, arg3, arg4, arg5, arg6, arg7, arg8);
+diff --git a/test/stress/fbtprovider/tst.return.d b/test/stress/fbtprovider/tst.return.d
+--- a/test/stress/fbtprovider/tst.return.d
++++ b/test/stress/fbtprovider/tst.return.d
+@@ -13,15 +13,17 @@
+ 
+ BEGIN
+ {
+-	self->traceme = 1;
++	traceme = 1;
+ }
+ 
+-fbt:::entry
++fbt::vfs_read:entry
++/traceme/
+ {
+ 	printf("Entering the function\n");
+ }
+ 
+-fbt:::return
++fbt::vfs_read:return
++/traceme/
+ {
+ 	printf("Returning the function\n");
+ 	exit(0);
+diff --git a/test/stress/fbtprovider/tst.tailcall.d b/test/stress/fbtprovider/tst.tailcall.d
+--- a/test/stress/fbtprovider/tst.tailcall.d
++++ b/test/stress/fbtprovider/tst.tailcall.d
+@@ -5,8 +5,6 @@
+  * http://oss.oracle.com/licenses/upl.
+  */
+ 
+-/* @@xfail: not yet ported */
+-
+ /*
+  * ASSERTION: simple fbt provider tailcall test.
+  *
+@@ -16,20 +14,21 @@
+ #pragma D option quiet
+ #pragma D option statusrate=10ms
+ 
+-fbt::ioctl:entry
++fbt::vfs_read:entry
+ {
+ 	self->traceme = 1;
+ }
+ 
+-fbt:::entry
++fbt::rw_verify_area:entry
+ /self->traceme/
+ {
+-	printf("called %s\n", probefunc);
++	self->nested = 1;
+ }
+ 
+-fbt::ioctl:return
+-/self->traceme/
++fbt::vfs_read:return
++/self->traceme && self->nested/
+ {
+	self->traceme = 0;
++	self->nested = 0;
+	exit (0);
+ }

@@ -25,6 +25,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: plan test matrix
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    outputs:
+      x86: ${{ steps.matrix.outputs.x86 }}
+      arm: ${{ steps.matrix.outputs.arm }}
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - id: matrix
+        name: Evaluate test matrix
+        run: |
+          echo "x86=$(nix eval --json .#lib.ciTestMatrix.x86_64-linux)" >> "$GITHUB_OUTPUT"
+          echo "arm=$(nix eval --json .#lib.ciTestMatrix.aarch64-linux)" >> "$GITHUB_OUTPUT"
+
   prepare:
     name: prepare flake on ${{ matrix.arch }}
     strategy:
@@ -56,20 +73,16 @@ jobs:
           extra_nix_config: system-features = ${{ matrix.system_features }}
       - name: Evaluate flake
         run: nix flake check --no-build --all-systems
-      - name: Prepare module check and DTrace packages
+      - name: Prepare module check and consumer closure
         run: |
           nix build --no-link -L \
             ".#checks.${{ matrix.system }}.vm" \
-            ".#packages.${{ matrix.system }}.dtrace-bpf-binutils" \
-            ".#packages.${{ matrix.system }}.dtrace-bpf-gcc" \
-            ".#packages.${{ matrix.system }}.oracle-dtrace^*"
+            ".#packages.${{ matrix.system }}.upstream-test-closure"
       - name: Export prepared Nix closure
         run: |
           nix copy \
             --to "file://${RUNNER_TEMP}/nix-cache?compression=zstd&parallel-compression=true" \
-            ".#packages.${{ matrix.system }}.dtrace-bpf-binutils" \
-            ".#packages.${{ matrix.system }}.dtrace-bpf-gcc" \
-            ".#packages.${{ matrix.system }}.oracle-dtrace^*"
+            ".#packages.${{ matrix.system }}.upstream-test-closure"
       - name: Upload prepared Nix closure
         uses: actions/upload-artifact@v7
         with:
@@ -80,16 +93,11 @@ jobs:
           retention-days: 1
 
   test-x86:
-    name: test flake on x86 (${{ matrix.shard }}/4)
-    needs: prepare
+    name: test ${{ matrix.coverage }} on x86 (${{ matrix.shard }}/${{ matrix.shards }})
+    needs: [plan, prepare]
     strategy:
       fail-fast: false
-      matrix:
-        shard:
-          - 1
-          - 2
-          - 3
-          - 4
+      matrix: ${{ fromJSON(needs.plan.outputs.x86) }}
 
     runs-on: ubuntu-26.04
     timeout-minutes: 120
@@ -116,35 +124,16 @@ jobs:
         run: |
           nix copy --no-check-sigs \
             --from "file://${RUNNER_TEMP}/nix-cache" \
-            ".#packages.x86_64-linux.dtrace-bpf-binutils" \
-            ".#packages.x86_64-linux.dtrace-bpf-gcc" \
-            ".#packages.x86_64-linux.oracle-dtrace^*"
+            ".#packages.x86_64-linux.upstream-test-closure"
       - name: Run upstream Linux shard
-        run: nix build --no-link -L ".#checks.x86_64-linux.upstream-${{ matrix.shard }}"
+        run: nix build --no-link -L ".#checks.x86_64-linux.upstream-${{ matrix.coverage }}-${{ matrix.shard }}"
 
   test-arm:
-    name: test flake on arm (${{ matrix.shard }}/16)
-    needs: prepare
+    name: test ${{ matrix.coverage }} on arm (${{ matrix.shard }}/${{ matrix.shards }})
+    needs: [plan, prepare]
     strategy:
       fail-fast: false
-      matrix:
-        shard:
-          - 1
-          - 2
-          - 3
-          - 4
-          - 5
-          - 6
-          - 7
-          - 8
-          - 9
-          - 10
-          - 11
-          - 12
-          - 13
-          - 14
-          - 15
-          - 16
+      matrix: ${{ fromJSON(needs.plan.outputs.arm) }}
 
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 120
@@ -165,8 +154,6 @@ jobs:
         run: |
           nix copy --no-check-sigs \
             --from "file://${RUNNER_TEMP}/nix-cache" \
-            ".#packages.aarch64-linux.dtrace-bpf-binutils" \
-            ".#packages.aarch64-linux.dtrace-bpf-gcc" \
-            ".#packages.aarch64-linux.oracle-dtrace^*"
+            ".#packages.aarch64-linux.upstream-test-closure"
       - name: Run upstream Linux shard
-        run: nix build --no-link -L ".#checks.aarch64-linux.upstream-${{ matrix.shard }}"
+        run: nix build --no-link -L ".#checks.aarch64-linux.upstream-${{ matrix.coverage }}-${{ matrix.shard }}"

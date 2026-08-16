@@ -1,6 +1,7 @@
 {
   pkgs,
   dtracePackage,
+  testsuite,
 }:
 
 let
@@ -27,74 +28,120 @@ pkgs.writeShellApplication {
       exit 1
     fi
 
-    if [[ -n "''${DTRACE_TEST_VMEM_LIMIT_KIB:-}" ]]; then
-      if [[ ! "$DTRACE_TEST_VMEM_LIMIT_KIB" =~ ^[1-9][0-9]*$ ]]; then
-        echo "DTRACE_TEST_VMEM_LIMIT_KIB must be a positive integer" >&2
-        exit 1
-      fi
+    test_timeout="''${DTRACE_TEST_TIMEOUT:-41}"
+    long_cutoff="''${DTRACE_TEST_LONG_CUTOFF:-41}"
+    coverage="''${DTRACE_TEST_COVERAGE:-core}"
 
-      ulimit -v "$DTRACE_TEST_VMEM_LIMIT_KIB"
-      echo "Limited each upstream test process to $DTRACE_TEST_VMEM_LIMIT_KIB KiB of virtual memory"
+    if [[ ! "$test_timeout" =~ ^[1-9][0-9]*$ ]]; then
+      echo "DTRACE_TEST_TIMEOUT must be a positive integer" >&2
+      exit 1
+    fi
+    if [[ ! "$long_cutoff" =~ ^[1-9][0-9]*$ ]]; then
+      echo "DTRACE_TEST_LONG_CUTOFF must be a positive integer" >&2
+      exit 1
     fi
 
     test_dir=$(mktemp -d -t dtrace-tests.XXXXXX)
-    trap 'rm -rf "$test_dir"' EXIT
+    cleanup() {
+      status=$?
+      trap - EXIT
+      if (( status != 0 )); then
+        while IFS= read -r summary; do
+          echo "===== $summary =====" >&2
+          cat "$summary" >&2
+        done < <(find "$test_dir/testsuite/test/log" -name runtest.sum -type f 2>/dev/null | LC_ALL=C sort)
+      fi
+      rm -rf "$test_dir"
+      exit "$status"
+    }
+    trap cleanup EXIT
 
-    cp -R ${dtracePackage.testsuite}/share/dtrace/testsuite "$test_dir/testsuite"
+    cp -R ${testsuite} "$test_dir/testsuite"
     chmod -R u+w "$test_dir/testsuite"
     cd "$test_dir/testsuite"
 
-    arch=$(uname -m)
-    test_timeout=41
-    if [[ "$arch" == aarch64 ]]; then
-      test_timeout=120
-    fi
-    echo "Using a $test_timeout second per-test timeout on $arch"
+    echo "Using execution policy: coverage=$coverage, per-test-timeout=$test_timeout, long-cutoff=$long_cutoff"
 
     export PKG_CONFIG_PATH=${dtracePackage}/lib/pkgconfig
     export TZDIR=${pkgs.tzdata}/share/zoneinfo
-    export CC=${pkgs.gcc}/bin/gcc
+    export CC=${pkgs.stdenv.cc}/bin/cc
     export NM=${pkgs.binutils}/bin/nm
     export OBJCOPY=${pkgs.binutils}/bin/objcopy
     export OBJDUMP=${pkgs.binutils}/bin/objdump
     export READELF=${pkgs.binutils}/bin/readelf
 
-    if [[ -n "''${DTRACE_TEST_SHARD_INDEX:-}" || -n "''${DTRACE_TEST_SHARD_COUNT:-}" ]]; then
-      if [[ ! "''${DTRACE_TEST_SHARD_INDEX:-}" =~ ^[0-9]+$ ]] ||
-         [[ ! "''${DTRACE_TEST_SHARD_COUNT:-}" =~ ^[1-9][0-9]*$ ]] ||
-         (( DTRACE_TEST_SHARD_INDEX >= DTRACE_TEST_SHARD_COUNT )); then
-        echo "DTRACE_TEST_SHARD_INDEX must select a zero-based shard within DTRACE_TEST_SHARD_COUNT" >&2
-        exit 1
-      fi
+    if (( $# == 0 )); then
+      case "$coverage" in
+        core|long)
+          test_roots=()
+          for suite in unittest internals demo smoke; do
+            [[ -d "test/$suite" ]] && test_roots+=("test/$suite")
+          done
+          ;;
+        stress|expensive)
+          test_roots=("test/$coverage")
+          ;;
+        all)
+          test_roots=(test)
+          ;;
+        *)
+          echo "DTRACE_TEST_COVERAGE must be core, long, stress, expensive, or all" >&2
+          exit 1
+          ;;
+      esac
 
-      test_roots=()
-      for suite in unittest internals stress demo smoke; do
-        [[ -d "test/$suite" ]] && test_roots+=("test/$suite")
-      done
-
-      mapfile -t all_tests < <(
+      mapfile -t candidates < <(
         find "''${test_roots[@]}" -type f \
           \( -name '*.d' -o -name '*.sh' -o -name '*.c' \) \
           -print | LC_ALL=C sort -u
       )
 
-      shard_tests=()
-      for test_index in "''${!all_tests[@]}"; do
-        if (( test_index % DTRACE_TEST_SHARD_COUNT == DTRACE_TEST_SHARD_INDEX )); then
-          shard_tests+=("''${all_tests[$test_index]}")
-        fi
+      selected_tests=()
+      for test_case in "''${candidates[@]}"; do
+        declared_timeout=$(sed -nE 's/.*@@timeout:[[:space:]]*([0-9]+).*/\1/p' "$test_case" | head -n1)
+        case "$coverage" in
+          core)
+            if [[ -z "$declared_timeout" ]] || (( declared_timeout <= long_cutoff )); then
+              selected_tests+=("$test_case")
+            fi
+            ;;
+          long)
+            if [[ -n "$declared_timeout" ]] && (( declared_timeout > long_cutoff )); then
+              selected_tests+=("$test_case")
+            fi
+            ;;
+          *)
+            selected_tests+=("$test_case")
+            ;;
+        esac
       done
 
-      echo "DTrace upstream shard $((DTRACE_TEST_SHARD_INDEX + 1))/$DTRACE_TEST_SHARD_COUNT: ''${#shard_tests[@]} cases"
-      set -- \
-        --timeout="$test_timeout" \
-        --skip-declared-longer=41 \
-        "''${shard_tests[@]}"
-    elif (( $# == 0 )); then
-      set -- \
-        --timeout="$test_timeout" \
-        --skip-declared-longer=41 \
-        --testsuites=unittest,internals,stress,demo,smoke
+      if [[ -n "''${DTRACE_TEST_SHARD_INDEX:-}" || -n "''${DTRACE_TEST_SHARD_COUNT:-}" ]]; then
+        if [[ ! "''${DTRACE_TEST_SHARD_INDEX:-}" =~ ^[0-9]+$ ]] ||
+           [[ ! "''${DTRACE_TEST_SHARD_COUNT:-}" =~ ^[1-9][0-9]*$ ]] ||
+           (( DTRACE_TEST_SHARD_INDEX >= DTRACE_TEST_SHARD_COUNT )); then
+          echo "DTRACE_TEST_SHARD_INDEX must select a zero-based shard within DTRACE_TEST_SHARD_COUNT" >&2
+          exit 1
+        fi
+
+        shard_tests=()
+        for test_index in "''${!selected_tests[@]}"; do
+          if (( test_index % DTRACE_TEST_SHARD_COUNT == DTRACE_TEST_SHARD_INDEX )); then
+            shard_tests+=("''${selected_tests[$test_index]}")
+          fi
+        done
+        selected_tests=("''${shard_tests[@]}")
+        echo "DTrace $coverage shard $((DTRACE_TEST_SHARD_INDEX + 1))/$DTRACE_TEST_SHARD_COUNT: ''${#selected_tests[@]} cases"
+      else
+        echo "DTrace $coverage coverage: ''${#selected_tests[@]} cases"
+      fi
+
+      if (( ''${#selected_tests[@]} == 0 )); then
+        echo "The selected coverage and shard contain no tests" >&2
+        exit 1
+      fi
+
+      set -- --timeout="$test_timeout" "''${selected_tests[@]}"
     fi
 
     test_output="$test_dir/test-output.log"

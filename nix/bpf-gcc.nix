@@ -17,11 +17,13 @@
 stdenv.mkDerivation (finalAttrs: {
   pname = "dtrace-bpf-gcc";
   inherit (gcc14.cc) version src;
+  strictDeps = true;
 
   patches = gcc14.cc.patches or [ ];
 
   nativeBuildInputs = [
     bison
+    bpf-binutils
     flex
     perl
     texinfo
@@ -64,7 +66,6 @@ stdenv.mkDerivation (finalAttrs: {
   hardeningDisable = [ "format" ];
 
   preConfigure = ''
-    export PATH=${bpf-binutils}/bin:$PATH
     mkdir ../build
     cd ../build
     configureScript=../$sourceRoot/configure

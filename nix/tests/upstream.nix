@@ -1,55 +1,58 @@
 {
   pkgs,
   self,
-  shardIndex ? null,
-  shardCount ? null,
+  executionProfile,
+  coverage,
+  shardIndex,
+  shardCount,
+  testCases ? [ ],
 }:
 
-assert (shardIndex == null) == (shardCount == null);
-assert shardIndex == null || (shardIndex >= 0 && shardIndex < shardCount);
+assert builtins.elem coverage [
+  "core"
+  "long"
+  "stress"
+];
+assert shardIndex >= 0 && shardIndex < shardCount;
 
 let
-  requireKvm = pkgs.stdenv.hostPlatform.system == "x86_64-linux";
   upstreamTest = self.packages.${pkgs.stdenv.hostPlatform.system}.upstream-test;
-  support = import ./upstream-support.nix { inherit pkgs; };
-  shardEnvironment = pkgs.lib.optionalString (shardIndex != null) (
-    "--setenv=DTRACE_TEST_SHARD_INDEX=${toString shardIndex} "
-    + "--setenv=DTRACE_TEST_SHARD_COUNT=${toString shardCount} "
-  );
-  testEnvironment =
-    shardEnvironment + "--setenv=DTRACE_TEST_VMEM_LIMIT_KIB=${toString (4 * 1024 * 1024)} ";
+  memorySize = executionProfile.memorySize.${coverage};
+  swapSize = executionProfile.swapSize.${coverage};
+  testEnvironment = pkgs.lib.concatStringsSep " " [
+    "--setenv=DTRACE_TEST_COVERAGE=${coverage}"
+    "--setenv=DTRACE_TEST_TIMEOUT=${toString executionProfile.perTestTimeout}"
+    "--setenv=DTRACE_TEST_LONG_CUTOFF=${toString executionProfile.longTestCutoff}"
+    "--setenv=DTRACE_TEST_SHARD_INDEX=${toString shardIndex}"
+    "--setenv=DTRACE_TEST_SHARD_COUNT=${toString shardCount}"
+  ];
+  testArguments = pkgs.lib.escapeShellArgs testCases;
 in
 
 pkgs.testers.runNixOSTest {
-  name = "oracle-dtrace-upstream";
-  requiredFeatures.kvm = requireKvm;
-  globalTimeout = 105 * 60;
+  name = "oracle-dtrace-upstream-${coverage}-${toString (shardIndex + 1)}-of-${toString shardCount}";
+  inherit (executionProfile) requiredFeatures globalTimeout;
 
   nodes.machine = {
-    imports = [ self.nixosModules.default ];
+    imports = [
+      self.nixosModules.default
+      (import ./upstream-host.nix { inherit upstreamTest; })
+    ];
     programs.dtrace.enable = true;
 
-    boot.kernelModules = [ "tun" ];
-    services.nfs.server.enable = true;
-    services.openssh.enable = true;
-
-    environment.systemPackages = [ upstreamTest ];
-
-    virtualisation.memorySize = 8192;
-    virtualisation.cores = 4;
-    virtualisation.qemu.forceAccel = pkgs.lib.mkForce requireKvm;
+    virtualisation.memorySize = memorySize;
+    virtualisation.cores = executionProfile.cores;
+    virtualisation.qemu.forceAccel = pkgs.lib.mkForce executionProfile.qemuAcceleration;
     virtualisation.useNixStoreImage = true;
     virtualisation.emptyDiskImages = [
       {
-        size = 8192;
+        size = swapSize;
         driveConfig = {
           name = "swap";
           deviceExtraOpts.serial = "dtrace-swap";
         };
       }
     ];
-
-    systemd.tmpfiles.rules = support.usrBinLinks;
   };
 
   testScript = ''
@@ -70,7 +73,7 @@ pkgs.testers.runNixOSTest {
         "--property=KillSignal=SIGKILL "
         "--property=StandardOutput=append:/tmp/dtrace-upstream-test.log "
         "--property=StandardError=append:/tmp/dtrace-upstream-test.log "
-        "${testEnvironment}${upstreamTest}/bin/dtrace-upstream-test"
+        "${testEnvironment} ${upstreamTest}/bin/dtrace-upstream-test ${testArguments}"
     )
     machine.wait_until_succeeds(f"test -e {log_path}")
 

@@ -17,7 +17,7 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       default = defaultPackage;
-      defaultText = lib.literalExpression "dtrace.packages.${pkgs.system}.oracle-dtrace";
+      defaultText = lib.literalExpression "self.packages.${pkgs.stdenv.hostPlatform.system}.oracle-dtrace";
       description = "The Oracle DTrace package to install and use for dtprobed.";
     };
 
@@ -37,9 +37,7 @@ in
 
     users.groups.dtrace.members = cfg.users;
 
-    services.udev.extraRules = ''
-      KERNEL=="dtrace/helper", MODE="0666"
-    '';
+    services.udev.packages = [ cfg.package ];
 
     boot.kernelModules = [ "cuse" ];
 
