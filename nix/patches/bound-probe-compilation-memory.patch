@@ -27,7 +27,7 @@ diff --git a/libdtrace/dt_bpf.c b/libdtrace/dt_bpf.c
  	}
  
  	return 0;
-@@ -1340,11 +1340,18 @@ dt_bpf_load_progs(dtrace_hdl_t *dtp, uint_t cflags)
+@@ -1340,10 +1340,17 @@ dt_bpf_load_progs(dtrace_hdl_t *dtp, uint_t cflags)
  		if (prp->prov->impl->add_probe)
  			prp->prov->impl->add_probe(dtp, prp);
  

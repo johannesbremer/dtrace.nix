@@ -1,0 +1,261 @@
+From: dtrace.nix maintainers
+Subject: module,fbt: avoid eager kallsyms walks
+
+The kernel's /proc/kallsyms iterator is extremely expensive under emulation,
+especially for modern kernels with Rust symbols.  Most DTrace operations do
+not need address-bearing kernel symbols: fprobes are enumerated by tracefs and
+typed by BTF.  Bootstrap the vmlinux BTF module cheaply, enumerate FBT probes
+from the kernel's canonical available-filter-functions list, and load the full
+symbol table only for explicit name/address symbol resolution.
+
+--- a/libdtrace/dt_impl.h
++++ b/libdtrace/dt_impl.h
+@@ -302,6 +302,7 @@ struct dtrace_hdl {
+ 	dt_list_t dt_modlist;	/* linked list of dt_module_t's */
+ 	dt_htab_t *dt_mods;	/* hash table of dt_module_t's */
+ 	dt_htab_t *dt_kernsyms; /* htab of kernel symbol names */
++	int dt_kernsyms_loaded; /* full kernel symbol table has been read */
+ 	char *dt_ctfa_path;	/* path to vmlinux.ctfa */
+ 	ctf_archive_t *dt_ctfa; /* ctf archive for the entire kernel tree */
+ 	char *dt_btf_path;	/* path to vmlinux.btf */
+--- a/libdtrace/dt_module.h
++++ b/libdtrace/dt_module.h
+@@ -15,6 +15,7 @@ extern "C" {
+ #endif
+ 
+ extern dt_module_t *dt_module_create(dtrace_hdl_t *, const char *);
++extern int dt_module_bootstrap(dtrace_hdl_t *);
+ 
+ extern dt_module_t *dt_module_lookup_by_name(dtrace_hdl_t *, const char *);
+ extern dt_module_t *dt_module_lookup_by_ctf(dtrace_hdl_t *, ctf_file_t *);
+--- a/libdtrace/dt_open.c
++++ b/libdtrace/dt_open.c
+@@ -905,7 +905,7 @@ dt_vopen(int version, int flags, int *errp,
+ 	 * Update the module list and load the values for the macro variable
+ 	 * definitions according to the current process.
+ 	 */
+-	updateerr = dtrace_update(dtp);
++	updateerr = dt_module_bootstrap(dtp);
+ 	if (updateerr != 0)
+ 		return set_open_errno(dtp, errp, updateerr);
+ 
+--- a/libdtrace/dt_btf.c
++++ b/libdtrace/dt_btf.c
+@@ -1284,6 +1284,8 @@ dt_btf_func_is_traceable(dtrace_hdl_t *dtp, const dt_btf_t *btf, uint32_t id)
+ 	}
+ 
+ 	argc = BTF_INFO_VLEN(type->info);
++	if (argc > 12)
++		return 0;
+ 	if (argc > 0) {
+ 		btf_param_t	*args = (btf_param_t *)(type + 1);
+ 		int		i;
+--- a/libdtrace/dt_module.c
++++ b/libdtrace/dt_module.c
+@@ -659,6 +659,21 @@ dt_module_unload(dtrace_hdl_t *dtp, dt_module_t *dmp)
+ 	dmp->dm_flags &= ~DT_DM_LOADED;
+ }
+ 
++/* Drop only address-bearing kernel symbols, preserving already-loaded BTF. */
++static void
++dt_module_unload_kernsyms(dtrace_hdl_t *dtp, dt_module_t *dmp)
++{
++	dt_symtab_destroy(dtp, dmp->dm_kernsyms);
++	dmp->dm_kernsyms = NULL;
++
++	free(dmp->dm_text_addrs);
++	free(dmp->dm_data_addrs);
++	dmp->dm_text_addrs = NULL;
++	dmp->dm_data_addrs = NULL;
++	dmp->dm_text_addrs_size = 0;
++	dmp->dm_data_addrs_size = 0;
++}
++
+ /*
+  * Insert a new external symbol reference into the specified module.  The new
+  * symbol will be marked as undefined and is assigned a symbol index beyond
+@@ -1600,8 +1615,14 @@ dtrace_update(dtrace_hdl_t *dtp)
+ 	dt_kasstate_t	*state = NULL;
+ 
+ 	for (dmp = dt_list_next(&dtp->dt_modlist);
+-	    dmp != NULL; dmp = dt_list_next(dmp))
+-		dt_module_unload(dtp, dmp);
++	    dmp != NULL; dmp = dt_list_next(dmp)) {
++		if (!(dmp->dm_flags & DT_DM_KERNEL))
++			continue;
++		if (dtp->dt_kernsyms_loaded)
++			dt_module_unload(dtp, dmp);
++		else
++			dt_module_unload_kernsyms(dtp, dmp);
++	}
+ 
+ 	/*
+ 	 * Note all the symbols currently loaded into the kernel's address
+@@ -1666,6 +1687,7 @@ dtrace_update(dtrace_hdl_t *dtp)
+ 	 * in Solaris.)
+ 	 */
+ 	dtp->dt_exec = dt_module_lookup_by_name(dtp, "vmlinux");
++	dtp->dt_kernsyms_loaded = 1;
+ 
+ 	/*
+ 	 * If this is the first time we are initializing the module list,
+@@ -1694,6 +1716,37 @@ dtrace_update(dtrace_hdl_t *dtp)
+ 	return 0;
+ }
+ 
++/*
++ * Establish the kernel module available directly from BTF and initialize
++ * process-valued macros.  The full address-bearing kernel symbol table is
++ * loaded lazily by the symbol lookup interfaces below.
++ */
++int
++dt_module_bootstrap(dtrace_hdl_t *dtp)
++{
++	dt_module_t	*dmp;
++
++	dmp = dt_module_lookup_by_name(dtp, "vmlinux");
++	if (dmp == NULL)
++		dmp = dt_module_create(dtp, "vmlinux");
++	if (dmp == NULL)
++		return EDT_NOMEM;
++
++	dmp->dm_flags |= DT_DM_KERNEL;
++	dtp->dt_exec = dmp;
++
++	dt_idhash_lookup(dtp->dt_macros, "egid")->di_id = getegid();
++	dt_idhash_lookup(dtp->dt_macros, "euid")->di_id = geteuid();
++	dt_idhash_lookup(dtp->dt_macros, "gid")->di_id = getgid();
++	dt_idhash_lookup(dtp->dt_macros, "pid")->di_id = getpid();
++	dt_idhash_lookup(dtp->dt_macros, "pgid")->di_id = getpgid(0);
++	dt_idhash_lookup(dtp->dt_macros, "ppid")->di_id = getppid();
++	dt_idhash_lookup(dtp->dt_macros, "sid")->di_id = getsid(0);
++	dt_idhash_lookup(dtp->dt_macros, "uid")->di_id = getuid();
++
++	return 0;
++}
++
+ /*
+  * Shuffle one module to the start of the module list.
+  */
+@@ -1783,6 +1836,11 @@ dtrace_lookup_by_name(dtrace_hdl_t *dtp, const char *object, const char *name,
+ 	uint_t mask = 0; /* mask of dt_module flags to match */
+ 	uint_t bits = 0; /* flag bits that must be present */
+ 
++	if (!dtp->dt_kernsyms_loaded && object != DTRACE_OBJ_CDEFS &&
++	    object != DTRACE_OBJ_DDEFS && object != DTRACE_OBJ_UMODS &&
++	    dtrace_update(dtp) != 0)
++		return -1;
++
+ 	if (object != DTRACE_OBJ_EVERY &&
+ 	    object != DTRACE_OBJ_KMODS &&
+ 	    object != DTRACE_OBJ_UMODS) {
+@@ -1932,6 +1990,9 @@ dtrace_lookup_by_addr(dtrace_hdl_t *dtp, GElf_Addr addr,
+ 	if (v != NULL)
+ 		return v->dtv_lookup_by_addr(dtp->dt_varg, addr, symp, sip);
+ 
++	if (!dtp->dt_kernsyms_loaded && dtrace_update(dtp) != 0)
++		return -1;
++
+ 	for (dmp = dt_list_next(&dtp->dt_modlist); dmp != NULL;
+ 	    dmp = dt_list_next(dmp)) {
+ 		void *i;
+--- a/libdtrace/dt_prov_fbt.c
++++ b/libdtrace/dt_prov_fbt.c
+@@ -52,6 +52,7 @@
+ static const char		prvname[] = "fbt";
+ 
+ #define KPROBE_EVENTS		TRACEFS "kprobe_events"
++#define FBT_FUNCTIONS		TRACEFS "available_filter_functions"
+ 
+ #define FBT_PROBE_FMT		"dt_%d_%s_%s"
+ 
+@@ -158,6 +159,80 @@ static int provide_probe(dtrace_hdl_t *dtp, dt_module_t *dmp,
+ #define FBT_ENTRY	1
+ #define FBT_RETURN	2
+ 
++/*
++ * Enumerate the kernel's canonical attachable-function list directly.  BTF
++ * supplies function prototypes and tracefs supplies fprobe eligibility, so
++ * building a complete address-bearing kallsyms table would be redundant.
++ */
++static int
++provide_tracefs(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp, int prb,
++		 int rawfbt)
++{
++	FILE			*f;
++	char			*buf = NULL;
++	size_t			len = 0;
++	int			n = 0;
++	dtrace_probedesc_t	pd;
++
++	f = fopen(FBT_FUNCTIONS, "r");
++	if (f == NULL)
++		return 0;
++
++	while (getline(&buf, &len, f) >= 0) {
++		char		*fun = buf;
++		char		*mod = "vmlinux";
++		char		*p;
++		dt_module_t	*dmp;
++
++		p = strchr(buf, '\n');
++		if (p != NULL)
++			*p = '\0';
++		p = strchr(buf, ' ');
++		if (p != NULL) {
++			*p++ = '\0';
++			if (*p == '[')
++				p++;
++			mod = p;
++			p = strchr(mod, ']');
++			if (p != NULL)
++				*p = '\0';
++		}
++
++		if (strncmp(fun, "__ftrace_invalid_address__", 26) == 0 ||
++		    strncmp(fun, "__probestub_", 12) == 0 ||
++		    strncmp(fun, "__traceiter_", 12) == 0 ||
++		    (!rawfbt && strchr(fun, '.')) ||
++		    !dt_gmatch(fun, pdp->fun) || !dt_gmatch(mod, pdp->mod))
++			continue;
++
++		dmp = dt_module_lookup_by_name(dtp, mod);
++		if (dmp == NULL)
++			dmp = dt_module_create(dtp, mod);
++		if (dmp == NULL)
++			continue;
++		dmp->dm_flags |= DT_DM_KERNEL;
++
++		pd.id = DTRACE_IDNONE;
++		pd.prv = pdp->prv;
++		pd.fun = fun;
++
++		if (prb & FBT_ENTRY) {
++			pd.prb = "entry";
++			n += provide_probe(dtp, dmp, &pd);
++		}
++		if (prb & FBT_RETURN) {
++			pd.prb = "return";
++			n += provide_probe(dtp, dmp, &pd);
++		}
++	}
++
++	free(buf);
++	fclose(f);
++	if (!rawfbt && dt_btf_get_module_ids(dtp) < 0)
++		return -1;
++	return n;
++}
++
+ static int provide(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp)
+ {
+ 	int			n = 0;
+@@ -258,6 +332,8 @@ static int provide(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp)
+ 	} else
+ 		rawfbt = 1;
+ 
++	return provide_tracefs(dtp, pdp, prb, rawfbt);
++
+ 	/*
+ 	 * If we have an explicit module name, check it.  If not found, we can
+ 	 * ignore this request.

@@ -1,0 +1,243 @@
+From: dtrace.nix maintainers
+Subject: btf,fbt: index function types and reject noreturn returns
+
+FBT population visits every traceable kernel symbol.  Looking up each symbol
+by linearly scanning the complete BTF table makes wildcard probe discovery
+quadratic.  Build a compact sorted name-and-kind index lazily and use binary
+search instead.
+
+Linux also rejects fexit attachment to an explicit set of noreturn functions;
+mirror that set while retaining their valid entry probes.
+
+--- a/libdtrace/dt_btf.c
++++ b/libdtrace/dt_btf.c
+@@ -9,6 +9,7 @@
+ #include <byteswap.h>
+ #include <errno.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <sys/mman.h>
+ #include <linux/btf.h>
+ 
+@@ -26,6 +27,12 @@
+ typedef struct btf_var_secinfo	btf_var_secinfo_t;
+ typedef struct btf_decl_tag	btf_decl_tag_t;
+ typedef struct btf_enum64	btf_enum64_t;
++
++typedef struct dt_btf_name {
++	const char	*name;
++	uint32_t	kind;
++	int32_t		id;
++} dt_btf_name_t;
+ 
+ struct dt_btf {
+ 	void		*data;			/* raw BTF data */
+@@ -36,6 +43,9 @@
+ 	int32_t		type_cnt;		/* number of types */
+ 	btf_type_t	**types;		/* type table */
+ 	ctf_id_t	*ctfids;		/* matching CTF type ids */
++	dt_btf_name_t	*names;			/* sorted name-and-kind index */
++	size_t		name_cnt;		/* entries in the name index */
++	int		names_built;		/* name index construction done */
+ };
+ 
+ static btf_type_t	btf_void;
+@@ -348,6 +358,7 @@
+ 	if (!btf)
+ 		return;
+ 
++	dt_free(dtp, btf->names);
+ 	dt_free(dtp, btf->data);
+ 	dt_free(dtp, btf->types);
+ 	dt_free(dtp, btf->ctfids);
+@@ -917,14 +928,102 @@
+ 		return btf->sdata + off;
+ 
+ 	return dt_btf_set_load_errno(dtp, EINVAL);
++}
++
++static int
++dt_btf_name_cmp(const void *lhs, const void *rhs)
++{
++	const dt_btf_name_t	*l = lhs;
++	const dt_btf_name_t	*r = rhs;
++	int			rc;
++
++	rc = strcmp(l->name, r->name);
++	if (rc != 0)
++		return rc;
++	if (l->kind != r->kind)
++		return l->kind < r->kind ? -1 : 1;
++	if (l->id != r->id)
++		return l->id < r->id ? -1 : 1;
++	return 0;
++}
++
++static int
++dt_btf_build_name_index(dtrace_hdl_t *dtp, dt_btf_t *btf)
++{
++	dt_btf_name_t	*names;
++	int32_t		i;
++	size_t		n = 0;
++
++	if (btf->names_built)
++		return 0;
++	if (btf->type_cnt <= 1) {
++		btf->names_built = 1;
++		return 0;
++	}
++
++	names = dt_alloc(dtp, (btf->type_cnt - 1) * sizeof(*names));
++	if (names == NULL) {
++		dt_btf_set_errno(dtp, ENOMEM);
++		return -ENOMEM;
++	}
++
++	for (i = 1; i < btf->type_cnt; i++) {
++		const btf_type_t	*type = btf->types[i];
++		const char		*name;
++
++		if (type->name_off == 0)
++			continue;
++		name = dt_btf_get_string(dtp, btf, type->name_off);
++		if (name == NULL || name[0] == '\0')
++			continue;
++
++		names[n].name = name;
++		names[n].kind = BTF_INFO_KIND(type->info);
++		names[n].id = i;
++		n++;
++	}
++
++	qsort(names, n, sizeof(*names), dt_btf_name_cmp);
++	btf->names = names;
++	btf->name_cnt = n;
++	btf->names_built = 1;
++	return 0;
+ }
+ 
++static int32_t
++dt_btf_lookup_name_index(dtrace_hdl_t *dtp, dt_btf_t *btf,
++			 const char *name, uint32_t kind)
++{
++	size_t	lo = 0, hi;
++
++	if (dt_btf_build_name_index(dtp, btf) < 0)
++		return -ENOMEM;
++
++	hi = btf->name_cnt;
++	while (lo < hi) {
++		size_t			mid = lo + (hi - lo) / 2;
++		const dt_btf_name_t	*entry = &btf->names[mid];
++		int			rc = strcmp(entry->name, name);
++
++		if (rc < 0 || (rc == 0 && entry->kind < kind))
++			lo = mid + 1;
++		else
++			hi = mid;
++	}
++
++	if (lo < btf->name_cnt && btf->names[lo].kind == kind &&
++	    strcmp(btf->names[lo].name, name) == 0)
++		return btf->names[lo].id;
++
++	return -ENOENT;
++}
++
+ int32_t
+ dt_btf_lookup_name_kind(dtrace_hdl_t *dtp, dt_module_t *dmp, const char *name,
+ 			uint32_t kind)
+ {
+ 	dt_btf_t	*btf = dmp->dm_btf;
+-	int32_t		i, base = 0;
++	int32_t		id, base = 0;
+ 
+ 	if (kind == BTF_KIND_UNKN)
+ 		return -ENOENT;
+@@ -957,19 +1056,12 @@
+ 	if (btf != dtp->dt_shared_btf)
+ 		base = dtp->dt_shared_btf->type_cnt - 1;
+ 
++	id = dt_btf_lookup_name_index(dtp, btf, name, kind);
++	if (id >= 0)
++		return id + base;
++	if (id == -ENOMEM)
++		return id;
+ 
+-	for (i = 1; i < btf->type_cnt; i++) {
+-		const btf_type_t	*type = btf->types[i];
+-		const char		*str;
+-
+-		if (BTF_INFO_KIND(type->info) != kind)
+-			continue;
+-
+-		str = dt_btf_get_string(dtp, btf, type->name_off);
+-		if (str && strcmp(name, str) == 0)
+-			return i + base;
+-	}
+-
+ 	if (base > 0)
+ 		return dt_btf_lookup_name_kind(dtp, dtp->dt_exec, name, kind);
+ 
+--- a/libdtrace/dt_prov_fbt.c
++++ b/libdtrace/dt_prov_fbt.c
+@@ -85,6 +85,38 @@
+ 	return 0;
+ }
+ 
++/*
++ * fexit cannot attach to these noreturn functions.  This list mirrors the
++ * kernel verifier's noreturn_deny BTF set.  The kernel currently maintains
++ * the set explicitly because noreturn is not represented in function BTF.
++ */
++static int
++fprobe_is_noreturn(const char *name)
++{
++	static const char *const noreturn[] = {
++		"__ia32_sys_exit",
++		"__ia32_sys_exit_group",
++		"__kunit_abort",
++		"__module_put_and_kthread_exit",
++		"__x64_sys_exit",
++		"__x64_sys_exit_group",
++		"do_exit",
++		"do_group_exit",
++		"kthread_complete_and_exit",
++		"kthread_exit",
++		"kunit_try_catch_throw",
++		"make_task_dead",
++	};
++	size_t	i;
++
++	for (i = 0; i < sizeof(noreturn) / sizeof(noreturn[0]); i++) {
++		if (strcmp(name, noreturn[i]) == 0)
++			return 1;
++	}
++
++	return 0;
++}
++
+ /* Create a probe (if it does not exist yet). */
+ static int provide_probe(dtrace_hdl_t *dtp, dt_module_t *dmp,
+ 			 dtrace_probedesc_t *pdp)
+@@ -98,12 +130,17 @@
+ 		return 0;
+ 
+ 	if (prv->impl->prog_type == BPF_PROG_TYPE_TRACING) {
+-		int32_t	btf_id;
++		int32_t		btf_id;
++		const dt_btf_t	*btf;
+ 
+ 		btf_id = dt_btf_lookup_name_kind(dtp, dmp, pdp->fun, BTF_KIND_FUNC);
++		btf = dmp->dm_btf != NULL ? dmp->dm_btf : dtp->dt_shared_btf;
+ 		if (btf_id <= 0 ||
+-		    !dt_btf_func_is_traceable(dtp, dmp->dm_btf, btf_id))
+-			return -1;
++		    !dt_btf_func_is_traceable(dtp, btf, btf_id))
++			return 0;
++		if (strcmp(pdp->prb, "return") == 0 &&
++		    fprobe_is_noreturn(pdp->fun))
++			return 0;
+ 	}
+ 
+ 	if (dt_tp_probe_insert(dtp, prv, pdp->prv, pdp->mod, pdp->fun, pdp->prb))

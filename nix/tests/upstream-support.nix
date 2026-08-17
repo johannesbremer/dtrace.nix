@@ -9,6 +9,7 @@
     pkgs.file
     pkgs.findutils
     pkgs.gawk
+    pkgs.glibc.bin
     pkgs.stdenv.cc
     pkgs.gnugrep
     pkgs.gnumake
@@ -16,6 +17,7 @@
     pkgs.iproute2
     pkgs.iputils
     pkgs.jdk
+    pkgs.kmod
     pkgs.netcat-openbsd
     pkgs.nfs-utils
     pkgs.openssh

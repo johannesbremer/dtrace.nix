@@ -1,0 +1,141 @@
+From: dtrace.nix maintainers
+Subject: fbt: remove obsolete kallsyms enumeration path
+
+FBT probe discovery now uses tracefs and BTF directly.  Remove the unreachable
+kallsyms-based implementation and its state so the provider has one canonical
+discovery path.
+
+--- a/libdtrace/dt_prov_fbt.c
++++ b/libdtrace/dt_prov_fbt.c
+@@ -235,13 +235,8 @@ provide_tracefs(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp, int prb,
+ 
+ static int provide(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp)
+ {
+-	int			n = 0;
+ 	int			prb = 0;
+ 	int			rawfbt = 0;
+-	dt_module_t		*dmp = NULL;
+-	dt_symbol_t		*sym = NULL;
+-	dt_htab_next_t		*it = NULL;
+-	dtrace_probedesc_t	pd;
+ 
+ 	/*
+ 	 * Nothing to do if a probe name is specified and cannot match 'entry'
+@@ -265,119 +260,6 @@ static int provide(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp)
+ 		rawfbt = 1;
+ 
+ 	return provide_tracefs(dtp, pdp, prb, rawfbt);
+-
+-	/*
+-	 * If we have an explicit module name, check it.  If not found, we can
+-	 * ignore this request.
+-	 */
+-	if (pdp->mod[0] != '\0' && strchr(pdp->mod, '*') == NULL) {
+-		dmp = dt_module_lookup_by_name(dtp, pdp->mod);
+-		if (dmp == NULL)
+-			return 0;
+-	}
+-
+-	/*
+-	 * Ensure that kernel symbols that are FBT-traceable are marked as
+-	 * such.  We don't do this earlier in this function so that the
+-	 * preceding tests have the greatest opportunity to avoid doing this
+-	 * unnecessarily.
+-	 */
+-	dt_modsym_mark_traceable(dtp);
+-
+-	/*
+-	 * If we have an explicit function name, we start with a basic symbol
+-	 * name lookup.
+-	 */
+-	if (pdp->fun[0] != '\0' && strchr(pdp->fun, '*') == NULL) {
+-		/* If we have a module, use it. */
+-		if (dmp != NULL) {
+-			sym = dt_module_symbol_by_name(dtp, dmp, pdp->fun);
+-			if (sym == NULL)
+-				return 0;
+-			if (!dt_symbol_traceable(sym))
+-				return 0;
+-
+-			pd.id = DTRACE_IDNONE;
+-			pd.prv = pdp->prv;
+-			pd.fun = pdp->fun;
+-
+-			if (prb & FBT_ENTRY) {
+-				pd.prb = "entry";
+-				n += provide_probe(dtp, dmp, &pd);
+-			}
+-			if (prb & FBT_RETURN) {
+-				pd.prb = "return";
+-				n += provide_probe(dtp, dmp, &pd);
+-			}
+-
+-			return n;
+-		}
+-
+-		sym = dt_symbol_by_name(dtp, pdp->fun);
+-		while (sym != NULL) {
+-			dmp = dt_symbol_module(sym);
+-			if (dt_symbol_traceable(sym) &&
+-			    dt_gmatch(dmp->dm_name, pdp->mod)) {
+-				pd.id = DTRACE_IDNONE;
+-				pd.prv = pdp->prv;
+-				pd.fun = pdp->fun;
+-
+-				if (prb & FBT_ENTRY) {
+-					pd.prb = "entry";
+-					n += provide_probe(dtp, dmp, &pd);
+-				}
+-				if (prb & FBT_RETURN) {
+-					pd.prb = "return";
+-					n += provide_probe(dtp, dmp, &pd);
+-				}
+-
+-			}
+-			sym = dt_symbol_by_name_next(sym);
+-		}
+-
+-		return n;
+-	}
+-
+-	/*
+-	 * No explicit function name.  We need to go through all possible
+-	 * symbol names and see if they match.
+-	 */
+-	while ((sym = dt_htab_next(dtp->dt_kernsyms, &it)) != NULL) {
+-		dt_module_t	*smp;
+-		const char	*fun;
+-
+-		/* Ensure the symbol can be traced. */
+-		if (!dt_symbol_traceable(sym))
+-			continue;
+-
+-		/* Function name cannot be synthetic (unless rawfbt) and must match. */
+-		fun = dt_symbol_name(sym);
+-		if ((!rawfbt && strchr(fun, '.')) || !dt_gmatch(fun, pdp->fun))
+-			continue;
+-
+-		/* Validate the module name. */
+-		smp = dt_symbol_module(sym);
+-		if (dmp) {
+-			if (smp != dmp)
+-				continue;
+-		} else if (!dt_gmatch(smp->dm_name, pdp->mod))
+-			continue;
+-
+-		pd.id = DTRACE_IDNONE;
+-		pd.prv = pdp->prv;
+-		pd.fun = fun;
+-
+-		if (prb & FBT_ENTRY) {
+-			pd.prb = "entry";
+-			n += provide_probe(dtp, smp, &pd);
+-		}
+-		if (prb & FBT_RETURN) {
+-			pd.prb = "return";
+-			n += provide_probe(dtp, smp, &pd);
+-		}
+-	}
+-
+-	return n;
+ }

@@ -1,0 +1,156 @@
+From: dtrace.nix maintainers
+Subject: module: parse modern long kallsyms names without overflowing
+
+Linux increased KSYM_NAME_LEN for Rust symbols.  The old unbounded sscanf()
+conversion writes names longer than 127 bytes across the adjacent module-name
+buffer, inventing modules from fragments of the symbol and corrupting probe
+discovery.  Match the modern kernel limit and parse both variable fields with
+explicit bounds.
+
+--- a/libdtrace/dt_module.c
++++ b/libdtrace/dt_module.c
+@@ -30,7 +30,7 @@
+ #include <dt_string.h>
+ #include <dt_btf.h>
+ 
+-#define KSYM_NAME_MAX 128		    /* from kernel/scripts/kallsyms.c */
++#define KSYM_NAME_MAX 512		    /* from kernel/include/linux/kallsyms.h */
+ #define GZCHUNKSIZE (1024*512)		    /* gzip uncompression chunk size */
+ 
+ static void
+@@ -1273,6 +1273,62 @@ typedef struct dt_kallsym {
+ 	char		mod[PATH_MAX];
+ } dt_kallsym_t;
+ 
++/*
++ * Parse the symbol name and optional "[module]" suffix after the numeric
++ * fields in a /proc/kall[mod]syms line.  Do not use an unbounded sscanf()
++ * conversion here: modern kernels can expose Rust symbols substantially
++ * longer than the historical 128-byte limit.
++ *
++ * Return 0 on success, 1 when an overlong entry should be skipped, and -1
++ * for malformed input.
++ */
++static int
++dt_kallsym_parse_name(const char *p, dt_kallsym_t *sym)
++{
++	const char	*start, *end;
++	size_t		n;
++
++	while (isspace((unsigned char)*p))
++		p++;
++	start = p;
++	while (*p != '\0' && !isspace((unsigned char)*p))
++		p++;
++
++	n = p - start;
++	if (n == 0)
++		return -1;
++	if (n >= sizeof(sym->name))
++		return 1;
++	memcpy(sym->name, start, n);
++	sym->name[n] = '\0';
++
++	strcpy(sym->mod, "vmlinux");
++	while (isspace((unsigned char)*p))
++		p++;
++	if (*p == '\0')
++		return 0;
++	if (*p++ != '[')
++		return -1;
++
++	end = strchr(p, ']');
++	if (end == NULL)
++		return -1;
++	n = end - p;
++	if (n == 0)
++		return -1;
++	if (n >= sizeof(sym->mod))
++		return 1;
++	memcpy(sym->mod, p, n);
++	sym->mod[n] = '\0';
++
++	for (p = end + 1; *p != '\0'; p++) {
++		if (!isspace((unsigned char)*p))
++			return -1;
++	}
++
++	return 0;
++}
++
+ static int
+ dt_modsym_addsym(dtrace_hdl_t *dtp, dt_module_t *dmp, dt_kallsym_t *sym,
+ 		 dt_kasstate_t *state)
+@@ -1405,44 +1461,53 @@ dt_modsym_update(dtrace_hdl_t *dtp, const char *line, dt_kasstate_t *state)
+ {
+ 	dt_kallsym_t	sym;
+ 	char		*modname;
++	int		off = 0;
++	int		rc;
+ 
+ 	if ((line[0] == '\n') || (line[0] == 0))
+ 		return 0;
+ 
+ 	sym.size = 1;
+-	strncpy(sym.mod, "vmlinux]", PATH_MAX);
+ 
+ 	/* Read symbol. */
+ 	if (state->kind == DT_MODSYM_KALLMODSYMS) {
+-		if (sscanf(line, "%llx %llx %c %s [%s",
++		if (sscanf(line, "%llx %llx %c %n",
+ 		    (long long unsigned *)&sym.addr,
+ 		    (long long unsigned *)&sym.size,
+-		    &sym.type, sym.name, sym.mod) < 4) {
++		    &sym.type, &off) < 3 || off == 0) {
+ 		    dt_dprintf("malformed /proc/kallmodsyms line: %s\n", line);
+ 		    return EDT_CORRUPT_KALLSYMS;
+ 		}
+-
+-		sym.mod[strlen(sym.mod)-1] = '\0';	/* chop trailing ] */
+ 	} else {
+-		int	matches;
+-
+-		matches = sscanf(line, "%llx %c %s [%s",
+-				 (long long unsigned *)&sym.addr, &sym.type,
+-				 sym.name, sym.mod);
+-		if (matches < 3) {
++		if (sscanf(line, "%llx %c %n",
++		    (long long unsigned *)&sym.addr, &sym.type, &off) < 2 ||
++		    off == 0) {
+ 			dt_dprintf("malformed /proc/kallsyms line: %s\n", line);
+ 			return EDT_CORRUPT_KALLSYMS;
+ 		}
++	}
+ 
+-		sym.mod[strlen(sym.mod)-1] = '\0';	/* chop trailing ] */
+-		if (matches == 3 &&
+-		    !(state->kernel_flag & KERNEL_FLAG_LOADABLE)) {
+-			char	*s;
++	rc = dt_kallsym_parse_name(line + off, &sym);
++	if (rc > 0) {
++		dt_dprintf("skipping overlong /proc/kall%s line: %s\n",
++		    state->kind == DT_MODSYM_KALLSYMS ? "syms" : "modsyms",
++		    line);
++		return 0;
++	}
++	if (rc < 0) {
++		dt_dprintf("malformed /proc/kall%s line: %s\n",
++		    state->kind == DT_MODSYM_KALLSYMS ? "syms" : "modsyms",
++		    line);
++		return EDT_CORRUPT_KALLSYMS;
++	}
+ 
+-			s = dt_kasstate_modname(state, sym.addr, sym.name);
+-			if (s != NULL)
+-				strncpy(sym.mod, s, PATH_MAX);
+-		}
++	if (strcmp(sym.mod, "vmlinux") == 0 &&
++	    !(state->kernel_flag & KERNEL_FLAG_LOADABLE)) {
++		char	*s;
++
++		s = dt_kasstate_modname(state, sym.addr, sym.name);
++		if (s != NULL)
++			strncpy(sym.mod, s, PATH_MAX);
+ 	}
+ 
+ 	if (strcmp(sym.mod, "bpf") == 0)

@@ -1,0 +1,19 @@
+From: dtrace.nix maintainers
+Subject: bpf: emit program disassembly only from the construction pass
+
+The bounded-memory change adds an analysis pass that constructs and immediately
+frees each program before the real construction pass.  Disassembly is an output
+side effect, not part of that analysis, so emitting it there duplicates every
+program listing.  Keep diagnostics in the real construction/linking pass.
+
+--- a/libdtrace/dt_bpf.c
++++ b/libdtrace/dt_bpf.c
+@@ -1283,8 +1283,6 @@
+ 		dp = dt_construct(dtp, prp, cflags, NULL);
+ 		if (dp == NULL)
+ 			return -1;
+-
+-		DT_DISASM_PROG(dtp, cflags, dp, stderr, NULL, prp->desc);
+ 
+ 		dt_difo_free(dtp, dp);
+ 	}

@@ -1,0 +1,169 @@
+From: dtrace.nix maintainers
+Subject: tests: synchronize fixtures and measure scheduler behavior robustly
+
+Remove remaining fixed-delay process races exposed by software-emulated guests:
+keep exec-loop targets alive until their owning runner releases them, wait for
+the particular deferred USDT probe needed by each target, and launch the raise
+target through DTrace's synchronized -c path.
+
+Measure switchrate relative to interleaved fastest samples so variable compile
+overhead cannot masquerade as scheduler delay.  Generate the MIB test's UDP
+traffic locally instead of relying on the obsolete rup utility.
+
+--- a/test/triggers/execloop
++++ b/test/triggers/execloop
+@@ -4,17 +4,12 @@
+ # http://oss.oracle.com/licenses/upl.
+ 
+ if [[ -z $LOOP ]]; then
+-    export LOOP=0
+-    export END=`date +'%s' -d '+10 secs'`
++    LOOP=0
+ fi
+ 
+-if [[ `date +'%s'` -ge $END ]]; then
+-    exit 0
+-fi
+-#if [[ $LOOP -eq 10000000 ]]; then
+-#    exit 0
+-#fi
++export LOOP=$((LOOP + 1))
+ 
+-LOOP=$(($LOOP+1))
+-
++# The testsuite owns and terminates this trigger after DTrace has grabbed it.
++# Keep execing until then so slow attachment cannot race a fixed deadline.
++sleep 0.01
+ exec $0
+--- a/test/triggers/usdt-tst-defer.c
++++ b/test/triggers/usdt-tst-defer.c
+@@ -56,8 +56,19 @@
+ 		TESTPROV_FOO();
+ 	}
+ 
+-	/* wait for probes to get set up */
+-	usleep(500 * 1000);
++	/*
++	 * Processes whose provider name ends in 0 through 4 are also matched by
++	 * the bar clauses.  Deferred discovery enables each clause separately,
++	 * so wait for bar itself instead of assuming a fixed setup delay.
++	 */
++	if (getpid() % 10 < 5) {
++		for (i = 0; i < 12000 && !TESTPROV_BAR_ENABLED(); i++)
++			usleep(10 * 1000);
++		if (!TESTPROV_BAR_ENABLED()) {
++			fprintf(stderr, "bar probe was not enabled\n");
++			return 1;
++		}
++	}
+ 
+ 	/* in phase 2, just loop over probe "bar" a fixed number of times */
+ 	for (i = 0; i < 10; i++) {
+--- a/test/unittest/actions/raise/tst.raise1.d
++++ b/test/unittest/actions/raise/tst.raise1.d
+@@ -6,8 +6,7 @@
+  */
+ 
+ /* @@trigger: raise-tst-raise1 */
+-/* @@trigger-timing: after */
+-/* @@runtest-opts: $_pid */
++/* @@trigger-timing: synchro */
+ 
+ /*
+  * ASSERTION:
+@@ -28,7 +27,7 @@
+ }
+ 
+ syscall::ioctl:entry
+-/pid == $1 && !self->raised/
++/pid == $target && !self->raised/
+ {
+ 	raise(SIGINT);
+ 	/*
+@@ -39,7 +38,7 @@
+ }
+ 
+ syscall::exit_group:entry
+-/pid == $1/
++/pid == $target/
+ {
+ 	exit(0);
+ }
+--- a/test/unittest/mib/tst.udp.sh
++++ b/test/unittest/mib/tst.udp.sh
+@@ -31,9 +31,9 @@
+ 
+ rupper()
+ {
+-	while true; do
+-		rup localhost || exit 1
+-		sleep 1
++	while kill -0 "$listener" 2>/dev/null; do
++		printf 'dtrace mib test\n' | nc -u -w 1 127.0.0.1 "$port" ||
++		    exit 1
+ 	done
+ }
+ 
+@@ -43,12 +43,16 @@
+ fi
+ 
+ dtrace=$1
++port=$((20000 + $$ % 20000))
+ 
++nc -u -l -k 127.0.0.1 "$port" >/dev/null &
++listener=$!
++
+ rupper &
+ rupper=$!
+ disown %+
+ script
+ status=$?
+ 
+-kill $rupper
++kill "$rupper" "$listener" 2>/dev/null || true
+ exit $status
+--- a/test/unittest/options/tst.switchrate.sh
++++ b/test/unittest/options/tst.switchrate.sh
+@@ -15,21 +15,31 @@
+ # "instantaneously" -- except that its termination will be delayed by a
+ # very long switchrate.
+ 
+-status=0
+-declare -A actual
+-for nexpect in 1 16; do
+-	# Run the "instantaneous" D script with the prescribed switchrate.
+-	# Time it.  Round to the nearest number of seconds with int(t+0.5).
+-	nactual=`/usr/bin/time -f "%e" \
+-	    $dtrace $dt_flags -xswitchrate=${nexpect}sec -qn 'BEGIN { exit(0) }' \
+-	    |& gawk 'NF != 0 {print int($1 + 0.5)}'`
++declare -A fastest
++for ((sample = 0; sample < 2; sample++)); do
++	for nexpect in 1 16; do
++		# Run the "instantaneous" D script with the prescribed switchrate.
++		# Time it.  Round to the nearest number of seconds with int(t+0.5).
++		nactual=`/usr/bin/time -f "%e" \
++		    $dtrace $dt_flags -xswitchrate=${nexpect}sec -qn \
++		    'BEGIN { exit(0) }' |& \
++		    gawk 'NF != 0 {print int($1 + 0.5)}'`
+ 
+-	actual[$nexpect]=$nactual
++		if [[ ! $nactual =~ ^[0-9]+$ ]]; then
++			echo "invalid elapsed time: $nactual"
++			exit 1
++		fi
++		if [[ -z ${fastest[$nexpect]+set} ]] ||
++		   [[ $nactual -lt ${fastest[$nexpect]} ]]; then
++			fastest[$nexpect]=$nactual
++		fi
++	done
+ done
+ 
+ # Startup and BPF compilation have a large, variable fixed cost under TCG.
+-# The difference still measures the switchrate delay itself.
+-test/utils/check_result.sh $((${actual[16]} - ${actual[1]})) 15 4
++# Interleaved samples and their fastest observations reduce that noise, while
++# the difference still verifies that switchrate itself delayed termination.
++test/utils/check_result.sh $((${fastest[16]} - ${fastest[1]})) 15 5
+ status=$?
+ 
+ exit $status

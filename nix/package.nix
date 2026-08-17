@@ -45,9 +45,15 @@ stdenv.mkDerivation (finalAttrs: {
     ./patches/fix-modern-bio-page-flags.patch
     ./patches/support-glibc-r-debug-v2.patch
     ./patches/configure-tshark-path.patch
+    ./patches/parse-modern-kallsyms.patch
     ./patches/filter-untraceable-fprobes.patch
+    ./patches/index-fprobe-eligibility.patch
+    ./patches/lazy-kernel-symbols.patch
+    ./patches/complete-tracefs-fbt-transition.patch
     ./patches/bound-probe-compilation-memory.patch
+    ./patches/suppress-analysis-disassembly.patch
     ./patches/stabilize-emulated-tests.patch
+    ./patches/stabilize-ci-regressions.patch
   ];
 
   nativeBuildInputs = [
