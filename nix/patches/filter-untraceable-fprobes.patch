@@ -1,0 +1,306 @@
+From: dtrace.nix maintainers
+Subject: btf,fbt: do not provide functions unsupported by BPF fprobes
+
+Backport Oracle DTrace commits 57d4e672, 135bcb8d, a4444618, and f6b98465,
+then extend their eligibility check to match the tracing-context verifier.
+BPF fentry/fexit cannot attach to variadic functions, functions returning a
+struct or union, functions with oversized aggregate arguments, or parameters
+whose BTF kind has no supported fprobe context representation.  Filter those
+functions while providing FBT probes instead of failing later while loading
+one program from a wildcard enabling.
+
+diff --git a/libdtrace/dt_btf.c b/libdtrace/dt_btf.c
+--- a/libdtrace/dt_btf.c
++++ b/libdtrace/dt_btf.c
+@@ -848,8 +848,61 @@ dt_btf_type_by_id(dtrace_hdl_t *dtp, const dt_btf_t *btf, int32_t id)
+ 	return btf->types[id - (dtp->dt_shared_btf->type_cnt - 1)];
+ }
+ 
++static btf_type_t *
++dt_btf_real_type_by_id(dtrace_hdl_t *dtp, const dt_btf_t *btf, int32_t id)
++{
++	btf_type_t	*type = dt_btf_type_by_id(dtp, btf, id);
++
++	while (type != NULL) {
++		switch (BTF_INFO_KIND(type->info)) {
++		case BTF_KIND_CONST:
++		case BTF_KIND_FUNC:
++		case BTF_KIND_RESTRICT:
++		case BTF_KIND_TYPEDEF:
++		case BTF_KIND_TYPE_TAG:
++		case BTF_KIND_VOLATILE:
++			type = dt_btf_type_by_id(dtp, btf, type->type);
++			break;
++		default:
++			return type;
++		}
++	}
++
++	return NULL;
++}
++
++/*
++ * Kernels without multi-level-pointer trampoline support (including 6.18)
++ * permit tracing-context access to pointers to void, integers, structs, and
++ * unions.  Other pointer targets fail btf_ctx_access().
++ */
++static int
++dt_btf_ptr_is_traceable(dtrace_hdl_t *dtp, const dt_btf_t *btf,
++			const btf_type_t *type)
++{
++	btf_type_t	*target;
++
++	if (type == NULL || BTF_INFO_KIND(type->info) != BTF_KIND_PTR)
++		return 0;
++	if (type->type == 0)
++		return 1;
++
++	target = dt_btf_real_type_by_id(dtp, btf, type->type);
++	if (target == NULL)
++		return 0;
++
++	switch (BTF_INFO_KIND(target->info)) {
++	case BTF_KIND_INT:
++	case BTF_KIND_STRUCT:
++	case BTF_KIND_UNION:
++		return 1;
++	default:
++		return 0;
++	}
++}
++
+ const char *
+-dt_btf_get_string(dtrace_hdl_t *dtp, dt_btf_t *btf, uint32_t off)
++dt_btf_get_string(dtrace_hdl_t *dtp, const dt_btf_t *btf, uint32_t off)
+ {
+ 	if (dtp->dt_shared_btf == NULL)
+ 		goto ok;
+@@ -978,30 +1031,98 @@ dt_btf_module_fd(const dt_module_t *dmp)
+ int
+ dt_btf_func_argc(dtrace_hdl_t *dtp, const dt_btf_t *btf, uint32_t id)
+ {
+-	btf_type_t	*type = dt_btf_type_by_id(dtp, btf, id);
++	btf_type_t	*type = dt_btf_real_type_by_id(dtp, btf, id);
+ 
+-	/* For functions, move on to the function prototype. */
+-	if (BTF_INFO_KIND(type->info) == BTF_KIND_FUNC)
+-		type = dt_btf_type_by_id(dtp, btf, type->type);
++	if (type == NULL)
++		return -1;
+ 
+-	if (BTF_INFO_KIND(type->info) == BTF_KIND_FUNC_PROTO)
+-		return BTF_INFO_VLEN(type->info);
++	if (BTF_INFO_KIND(type->info) != BTF_KIND_FUNC_PROTO)
++		return -1;
+ 
+-	return -1;
++	return BTF_INFO_VLEN(type->info);
+ }
+ 
+ int
+ dt_btf_func_is_void(dtrace_hdl_t *dtp, const dt_btf_t *btf, uint32_t id)
+ {
+-	btf_type_t	*type = dt_btf_type_by_id(dtp, btf, id);
+-
+-	/* For functions, move on to the function prototype. */
+-	if (BTF_INFO_KIND(type->info) == BTF_KIND_FUNC)
+-		type = dt_btf_type_by_id(dtp, btf, type->type);
++	btf_type_t	*type = dt_btf_real_type_by_id(dtp, btf, id);
+ 
+-	if (BTF_INFO_KIND(type->info) == BTF_KIND_FUNC_PROTO &&
+-	    type->type == 0)
++	if (type != NULL &&
++	    BTF_INFO_KIND(type->info) == BTF_KIND_FUNC_PROTO && type->type == 0)
+ 		return 1;
+ 
+ 	return 0;
+ }
++
++/*
++ * Return 1 if the function referenced by the BTF id can be traced using the
++ * fprobe/fexit facility.  Specifically, that the function is not variadic,
++ * that every argument and return value has a supported BTF representation,
++ * and that no argument exceeds the acceptable value size (16 bytes).  See
++ * btf_distill_func_proto() and btf_ctx_access() in kernel/bpf/btf.c.
++ */
++int
++dt_btf_func_is_traceable(dtrace_hdl_t *dtp, const dt_btf_t *btf, uint32_t id)
++{
++	btf_type_t	*type = dt_btf_real_type_by_id(dtp, btf, id);
++	uint32_t	kind;
++	int		argc;
++
++	/* If no prototype is found, BPF fprobes do not work. */
++	if (!type || BTF_INFO_KIND(type->info) != BTF_KIND_FUNC_PROTO)
++		return 0;
++
++	/*
++	 * Match the types accepted by __get_type_size() in kernel/bpf/btf.c.
++	 * A void return is valid, but aggregate and unsized return types are not.
++	 */
++	if (type->type != 0) {
++		btf_type_t	*rtype = dt_btf_real_type_by_id(dtp, btf, type->type);
++
++		if (rtype == NULL)
++			return 0;
++
++		kind = BTF_INFO_KIND(rtype->info);
++		if (kind == BTF_KIND_PTR) {
++			if (!dt_btf_ptr_is_traceable(dtp, btf, rtype))
++				return 0;
++		} else if (kind != BTF_KIND_INT &&
++		    kind != BTF_KIND_ENUM && kind != BTF_KIND_ENUM64)
++			return 0;
++	}
++
++	argc = BTF_INFO_VLEN(type->info);
++	if (argc > 0) {
++		btf_param_t	*args = (btf_param_t *)(type + 1);
++		int		i;
++
++		if (args[argc - 1].type == 0)
++			return 0;
++
++		for (i = 0; i < argc; i++) {
++			type = dt_btf_real_type_by_id(dtp, btf, args[i].type);
++			if (type == NULL)
++				return 0;
++
++			kind = BTF_INFO_KIND(type->info);
++			switch (kind) {
++			case BTF_KIND_PTR:
++				if (!dt_btf_ptr_is_traceable(dtp, btf, type))
++					return 0;
++				break;
++			case BTF_KIND_INT:
++			case BTF_KIND_ENUM:
++			case BTF_KIND_ENUM64:
++			case BTF_KIND_STRUCT:
++			case BTF_KIND_UNION:
++				if (type->size == 0 || type->size > 16)
++					return 0;
++				break;
++			default:
++				return 0;
++			}
++		}
++	}
++
++	return 1;
++}
+diff --git a/libdtrace/dt_btf.h b/libdtrace/dt_btf.h
+--- a/libdtrace/dt_btf.h
++++ b/libdtrace/dt_btf.h
+@@ -20,13 +20,16 @@ typedef struct bpf_btf_info	btf_info_t;
+ extern void dt_btf_destroy(dtrace_hdl_t *, dt_btf_t *);
+ extern dt_btf_t *dt_btf_load_module(dtrace_hdl_t *, dt_module_t *);
+ extern ctf_dict_t *dt_btf_module_ctf(dtrace_hdl_t *, dt_module_t *);
+-extern const char *dt_btf_get_string(dtrace_hdl_t *, dt_btf_t *, uint32_t);
++extern const char *dt_btf_get_string(dtrace_hdl_t *, const dt_btf_t *,
++				     uint32_t);
+ extern int32_t dt_btf_lookup_name_kind(dtrace_hdl_t *, dt_module_t *,
+ 				       const char *, uint32_t);
+ extern int dt_btf_func_argc(dtrace_hdl_t *dtp, const dt_btf_t *btf,
+ 			    uint32_t id);
+ extern int dt_btf_func_is_void(dtrace_hdl_t *dtp, const dt_btf_t *btf,
+ 			       uint32_t id);
++extern int dt_btf_func_is_traceable(dtrace_hdl_t *dtp, const dt_btf_t *btf,
++				    uint32_t id);
+ extern int dt_btf_get_module_ids(dtrace_hdl_t *);
+ extern int dt_btf_module_fd(const dt_module_t *);
+ 
+diff --git a/libdtrace/dt_prov_fbt.c b/libdtrace/dt_prov_fbt.c
+--- a/libdtrace/dt_prov_fbt.c
++++ b/libdtrace/dt_prov_fbt.c
+@@ -86,14 +86,26 @@ static int populate(dtrace_hdl_t *dtp)
+ }
+ 
+ /* Create a probe (if it does not exist yet). */
+-static int provide_probe(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp)
++static int provide_probe(dtrace_hdl_t *dtp, dt_module_t *dmp,
++			 dtrace_probedesc_t *pdp)
+ {
+ 	dt_provider_t	*prv = dt_provider_lookup(dtp, pdp->prv);
+ 
+ 	if (prv == NULL)
+ 		return 0;
++	pdp->mod = dmp->dm_name;
+ 	if (dt_probe_lookup(dtp, pdp) != NULL)
+ 		return 0;
++
++	if (prv->impl->prog_type == BPF_PROG_TYPE_TRACING) {
++		int32_t	btf_id;
++
++		btf_id = dt_btf_lookup_name_kind(dtp, dmp, pdp->fun, BTF_KIND_FUNC);
++		if (btf_id <= 0 ||
++		    !dt_btf_func_is_traceable(dtp, dmp->dm_btf, btf_id))
++			return -1;
++	}
++
+ 	if (dt_tp_probe_insert(dtp, prv, pdp->prv, pdp->mod, pdp->fun, pdp->prb))
+ 		return 1;
+ 
+@@ -173,16 +190,15 @@ static int provide(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp)
+ 
+ 			pd.id = DTRACE_IDNONE;
+ 			pd.prv = pdp->prv;
+-			pd.mod = dmp->dm_name;
+ 			pd.fun = pdp->fun;
+ 
+ 			if (prb & FBT_ENTRY) {
+ 				pd.prb = "entry";
+-				n += provide_probe(dtp, &pd);
++				n += provide_probe(dtp, dmp, &pd);
+ 			}
+ 			if (prb & FBT_RETURN) {
+ 				pd.prb = "return";
+-				n += provide_probe(dtp, &pd);
++				n += provide_probe(dtp, dmp, &pd);
+ 			}
+ 
+ 			return n;
+@@ -190,22 +206,20 @@ static int provide(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp)
+ 
+ 		sym = dt_symbol_by_name(dtp, pdp->fun);
+ 		while (sym != NULL) {
+-			const char	*mod = dt_symbol_module(sym)->dm_name;
+-
++			dmp = dt_symbol_module(sym);
+ 			if (dt_symbol_traceable(sym) &&
+-			    dt_gmatch(mod, pdp->mod)) {
++			    dt_gmatch(dmp->dm_name, pdp->mod)) {
+ 				pd.id = DTRACE_IDNONE;
+ 				pd.prv = pdp->prv;
+-				pd.mod = mod;
+ 				pd.fun = pdp->fun;
+ 
+ 				if (prb & FBT_ENTRY) {
+ 					pd.prb = "entry";
+-					n += provide_probe(dtp, &pd);
++					n += provide_probe(dtp, dmp, &pd);
+ 				}
+ 				if (prb & FBT_RETURN) {
+ 					pd.prb = "return";
+-					n += provide_probe(dtp, &pd);
++					n += provide_probe(dtp, dmp, &pd);
+ 				}
+ 
+ 			}
+@@ -242,15 +256,14 @@ static int provide(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp)
+ 
+ 		pd.id = DTRACE_IDNONE;
+ 		pd.prv = pdp->prv;
+-		pd.mod = smp->dm_name;
+ 		pd.fun = fun;
+ 
+ 		if (prb & FBT_ENTRY) {
+ 			pd.prb = "entry";
+-			n += provide_probe(dtp, &pd);
++			n += provide_probe(dtp, smp, &pd);
+ 		}
+ 		if (prb & FBT_RETURN) {
+ 			pd.prb = "return";
+-			n += provide_probe(dtp, &pd);
++			n += provide_probe(dtp, smp, &pd);
+ 		}
+ 	}

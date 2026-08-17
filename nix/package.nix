@@ -44,6 +44,10 @@ stdenv.mkDerivation (finalAttrs: {
     ./patches/fix-btf-function-parameters.patch
     ./patches/fix-modern-bio-page-flags.patch
     ./patches/support-glibc-r-debug-v2.patch
+    ./patches/configure-tshark-path.patch
+    ./patches/filter-untraceable-fprobes.patch
+    ./patches/bound-probe-compilation-memory.patch
+    ./patches/stabilize-emulated-tests.patch
   ];
 
   nativeBuildInputs = [
@@ -139,16 +143,12 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail \
         'static const char *_dtrace_defld = "ld";' \
         'static const char *_dtrace_defld = "${binutils-unwrapped}/bin/ld";'
-    # dt_pcap deliberately sanitizes the environment before dropping
-    # privileges, so its FHS-only PATH cannot find a tshark supplied through a
-    # Nix profile.  Use the packaged executable for both discovery and exec.
+    # Keep tshark in the runtime closure while allowing callers to explicitly
+    # select the documented tracemem fallback through DTRACE_TSHARK.
     substituteInPlace libdtrace/dt_pcap.c \
       --replace-fail \
-        'status = system("tshark -v >/dev/null 2>&1");' \
-        'status = system("${wireshark-cli}/bin/tshark -v >/dev/null 2>&1");' \
-      --replace-fail \
-        'execlp("tshark", "tshark", "-l", "-i", "-", NULL);' \
-        'execl("${wireshark-cli}/bin/tshark", "tshark", "-l", "-i", "-", NULL);'
+        '@tshark@' \
+        '${wireshark-cli}/bin/tshark'
     substituteInPlace test/triggers/Build \
       --replace-fail \
         'visible-constructor visible-constructor-static visible-constructor-static-unstripped' \

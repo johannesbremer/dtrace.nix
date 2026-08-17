@@ -1,0 +1,475 @@
+From: dtrace.nix maintainers
+Subject: tests: synchronize process and USDT fixtures explicitly
+
+Software-emulated guests can spend several seconds compiling and attaching a
+DTrace program.  Do not use fixed sleeps, or the creation of DTrace's output
+file, as evidence that the consumer and its probes are ready.  Keep targets
+alive until enablement, use BEGIN handshakes for consumers, and derive bounded
+polling deadlines from the runner's timeout.
+
+Also make the pid dash fixture non-PIE because that test intentionally compares
+link-time absolute addresses, and compare switchrate delays relative to the
+same guest's startup overhead.
+
+diff --git a/test/unittest/pid/tst.dash.sh b/test/unittest/pid/tst.dash.sh
+--- a/test/unittest/pid/tst.dash.sh
++++ b/test/unittest/pid/tst.dash.sh
+@@ -54,5 +54,5 @@ int main(int c, char **v) {
+ 
+-$CC main.c
++$CC -no-pie main.c
+ if [ $? -ne 0 ]; then
+ 	echo ERROR compile
+ 	exit 1
+diff --git a/test/unittest/options/tst.switchrate.sh b/test/unittest/options/tst.switchrate.sh
+--- a/test/unittest/options/tst.switchrate.sh
++++ b/test/unittest/options/tst.switchrate.sh
+@@ -16,6 +16,7 @@ dtrace=$1
+ # very long switchrate.
+ 
+ status=0
++declare -A actual
+ for nexpect in 1 16; do
+ 	# Run the "instantaneous" D script with the prescribed switchrate.
+ 	# Time it.  Round to the nearest number of seconds with int(t+0.5).
+@@ -23,11 +24,12 @@ for nexpect in 1 16; do
+ 	    $dtrace $dt_flags -xswitchrate=${nexpect}sec -qn 'BEGIN { exit(0) }' \
+ 	    |& gawk 'NF != 0 {print int($1 + 0.5)}'`
+ 
+-	# Check the actual number of seconds to the expected value.
+-	# Actually, the actual time might be a few seconds longer than expected.
+-	# So pad $nexpect.
+-	test/utils/check_result.sh $nactual $(($nexpect + 3)) 4
+-	status=$(($status + $?))
++	actual[$nexpect]=$nactual
+ done
+ 
++# Startup and BPF compilation have a large, variable fixed cost under TCG.
++# The difference still measures the switchrate delay itself.
++test/utils/check_result.sh $((${actual[16]} - ${actual[1]})) 15 4
++status=$?
++
+ exit $status
+diff --git a/test/unittest/dtrace-util/tst.ProcGrab.sh b/test/unittest/dtrace-util/tst.ProcGrab.sh
+--- a/test/unittest/dtrace-util/tst.ProcGrab.sh
++++ b/test/unittest/dtrace-util/tst.ProcGrab.sh
+@@ -23,10 +23,20 @@ if [ $# != 1 ]; then
+ 
+ dtrace=$1
++release=$tmpdir/procgrab.release.$$
+ 
+-sleep 5 &
++rm -f "$release"
++bash -c 'while [[ ! -e "$1" ]]; do sleep 0.1; done' _ "$release" &
+ 
+ sleepid=$!
+ 
+-$dtrace $dt_flags -q -p $sleepid -n 'proc:::exit /pid == $target/ { printf("exit seen, exitcode %i\n", arg0); }'
++$dtrace $dt_flags -wq -p $sleepid -n '
++BEGIN
++{
++	system("touch '$release'");
++}
++proc:::exit /pid == $target/
++{
++	printf("exit seen, exitcode %i\n", arg0);
++}'
+ 
+ status=$?
+diff --git a/test/unittest/actions/exit/tst.kill.sh b/test/unittest/actions/exit/tst.kill.sh
+--- a/test/unittest/actions/exit/tst.kill.sh
++++ b/test/unittest/actions/exit/tst.kill.sh
+@@ -10,19 +10,16 @@ dtrace=$1
+ 
+ watch_output_for() {
+-    for iter in `seq 10`; do
++    for ((iter = 0; iter < timeout; iter++)); do
+         sleep 1
+-        if grep -q $1 $out; then
+-            iter=0
+-            break
++        if grep -q "$1" "$out" 2>/dev/null; then
++            return 0
+         fi
+     done
+-    if [[ $iter -ne 0 ]]; then
+-        echo ERROR: missing $1 in output file
+-        exit 1
+-    fi
++    echo ERROR: missing $1 in output file
++    exit 1
+ }
+ 
+-$dtrace $dt_flags -n BEGIN,END -o $out &
++$dtrace $dt_flags -n BEGIN,END -o "$out" &
+ watch_output_for :BEGIN
+ kill %1
+ watch_output_for :END
+diff --git a/test/unittest/usdt/tst.defer-Z.sh b/test/unittest/usdt/tst.defer-Z.sh
+--- a/test/unittest/usdt/tst.defer-Z.sh
++++ b/test/unittest/usdt/tst.defer-Z.sh
+@@ -28,7 +28,12 @@ cp $trigger main
+ 
+ # Start dtrace.
+ 
++rm -f dtrace.ready
+ $dtrace $dt_flags -Zwq -o dtrace.out -n '
++BEGIN
++{
++	system("touch dtrace.ready");
++}
+ testprov*:::foo
+ {
+ 	raise(SIGUSR1);
+@@ -46,10 +51,10 @@ testprov*4:::bar
+ dtpid=$!
+ 
+-# Wait up to half of the timeout period for dtrace to start up.
++# Wait up to half of the timeout period for probe enablement to complete.
+ 
+ iter=$((timeout / 2))
+ while [ $iter -gt 0 ]; do
+ 	sleep 1
+-	if [ -e dtrace.out ]; then
++	if [ -e dtrace.ready ]; then
+ 		break
+ 	fi
+diff --git a/test/unittest/usdt/tst.stapsdt-notes-lib.sh b/test/unittest/usdt/tst.stapsdt-notes-lib.sh
+--- a/test/unittest/usdt/tst.stapsdt-notes-lib.sh
++++ b/test/unittest/usdt/tst.stapsdt-notes-lib.sh
+@@ -48,15 +48,25 @@ EOF
+ cat > test.c <<EOF
+ 
++#include <stdio.h>
+ #include <unistd.h>
+ 
+ extern void libfn(int argc, char **argv);
+ 
+ int
+ main(int argc, char **argv)
+ {
++	FILE *ready;
++
+ 	libfn(0, 0);
+-	sleep(10);
++	ready = fopen("target.ready", "w");
++	if (ready == NULL)
++		return 1;
++	fclose(ready);
++	while (access("target.start", F_OK) != 0)
++		usleep(10000);
+ 	libfn(argc, argv);
++	while (access("target.finish", F_OK) != 0)
++		usleep(10000);
+ 	return 0;
+ }
+ EOF
+@@ -71,10 +81,36 @@ if [ $? -ne 0 ]; then
+ fi
+ 
+ export LD_LIBRARY_PATH=.:${LD_LIBRARY_PATH}
++rm -f target.ready target.start target.finish dtrace.ready dtrace.out
+ LD_LIBRARY_PATH=.:${LD_LIBRARY_PATH} ./test &
+ PID=$!
+-sleep 5
+-$dtrace -p $PID -qs /dev/stdin <<EOF
++trap 'kill $PID 2>/dev/null || true' EXIT
++
++iter=$((timeout / 2))
++while ((iter > 0)); do
++	if [[ -e target.ready ]] && $dtrace $dt_flags -lP test_prov$PID >/dev/null 2>&1; then
++		break
++	fi
++	sleep 1
++	iter=$((iter - 1))
++done
++if ((iter == 0)); then
++	echo "timed out waiting for test_prov$PID" >&2
++	exit 1
++fi
++
++probe_wait=$((timeout / 2))
++$dtrace $dt_flags -w -p $PID -o dtrace.out -qs /dev/stdin <<EOF &
++int ready;
++int seen;
++
++tick-1ms
++/ !ready /
++{
++	ready = 1;
++	system("touch dtrace.ready");
++}
++
+ test_prov\$target:::zero
+ {
+ 	printf("%s:%s:%s\n", probemod, probefunc, probename);
+@@ -139,7 +175,41 @@ test_prov\$target:::twelve
+ 	printf("%s:%s:%s:%li:%li:%li:%li:%li:%li:%li:%li:%li:%li\n", probemod, probefunc, probename,
+ 	       arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9);
+ }
++
++test_prov\$target:::
++{
++	seen++;
++}
++
++test_prov\$target:::
++/ seen == 13 /
++{
++	exit(0);
++}
++
++tick-${probe_wait}s
++/ seen < 13 /
++{
++	printf("timed out after %d of 13 probes\n", seen);
++	exit(1);
++}
+ EOF
++dtpid=$!
++
++deadline=$((SECONDS + timeout / 2))
++while [[ ! -e dtrace.ready && $SECONDS -lt $deadline ]]; do
++	sleep 0.1
++done
++if [[ ! -e dtrace.ready ]]; then
++	echo "timed out waiting for DTrace to enter its event loop" >&2
++	exit 1
++fi
++
++touch target.start
++wait $dtpid
+ status=$?
++touch target.finish
++wait $PID
++cat dtrace.out
+ 
+ exit $status
+diff --git a/test/unittest/usdt/tst.multitrace.sh b/test/unittest/usdt/tst.multitrace.sh
+--- a/test/unittest/usdt/tst.multitrace.sh
++++ b/test/unittest/usdt/tst.multitrace.sh
+@@ -35,14 +35,34 @@ if [ $? -ne 0 ]; then
+ 
+ cat > test.c <<EOF
++#include <signal.h>
++#include <stdio.h>
+ #include <sys/types.h>
++#include <unistd.h>
+ #include "multitrace.h"
+ 
++static volatile sig_atomic_t run;
++
++static void
++start(int sig)
++{
++	run = 1;
++}
++
+ int
+ main(int argc, char **argv)
+ {
++	char path[64];
++	FILE *ready;
+ 	size_t i;
+ 
+-	sleep(10);
++	signal(SIGUSR1, start);
++	snprintf(path, sizeof(path), "target.ready.%s", argv[1]);
++	ready = fopen(path, "w");
++	if (ready == NULL)
++		return 1;
++	fclose(ready);
++	while (!run)
++		pause();
+ 	for (i = 0; i < 5; i++) {
+ 		if (TEST_MULTITRACE_GO_ENABLED())
+ 			TEST_MULTITRACE_GO();
+@@ -75,6 +95,14 @@ script() {
+ 	exec $dtrace $dt_flags -qws /dev/stdin $1 $2 $3 2> debug.$3 <<'EOF'
+ 	int fired[pid_t];
+ 	int exited[pid_t];
++	int ready;
+ 
++	tick-1ms
++	/ !ready /
++	{
++		ready = 1;
++		system("touch dtrace.ready.%d", $3);
++	}
++
+ 	test_multitrace$1:::go, test_multitrace$2:::go
+ 	{
+@@ -141,6 +169,18 @@ DONE=$!
+ script $ONE $TWO 2 &
+ DTWO=$!
+ 
++iter=$((timeout / 2))
++while ((iter > 0)); do
++    if [[ -e target.ready.1 && -e target.ready.2 &&
++          -e dtrace.ready.1 && -e dtrace.ready.2 ]]; then
++        break
++    fi
++    sleep 1
++    iter=$((iter - 1))
++done
++[[ $iter -gt 0 ]] || { echo "tracers did not become ready" >&2; exit 1; }
++kill -USR1 $ONE $TWO
++
+ dump_debug() {
+     if [[ -n $DTRACE_DEBUG ]]; then
+         echo "runtest DEBUG $(date +%s): Debug output of first dtrace so far, PID $DONE" >&2
+diff --git a/test/unittest/usdt/tst.nusdtprobes.sh b/test/unittest/usdt/tst.nusdtprobes.sh
+--- a/test/unittest/usdt/tst.nusdtprobes.sh
++++ b/test/unittest/usdt/tst.nusdtprobes.sh
+@@ -98,18 +98,23 @@ for nusdt in "" "-xnusdtprobes=40" "-xnusdtprobes=39"; do
+ 	# Start DTrace.
+ 
+-	rm -f dtrace.out
+-	$dtrace $dt_flags $nusdt -Zq -o dtrace.out -n '
++	rm -f dtrace.out dtrace.ready
++	$dtrace $dt_flags $nusdt -Zwq -o dtrace.out -n '
++	BEGIN
++	{
++		system("touch dtrace.ready");
++	}
++
+ 	testprov*:::
+ 	{
+ 		@[probeprov, probemod, probefunc, probename] = count();
+ 	}' &
+ 	dtpid=$!
+ 
+-	# Wait a little for dtrace to start up.
++	# Wait for initial probe enablement to complete.
+ 
+ 	iter=$((timeout / 4))
+ 	while [ $iter -gt 0 ]; do
+ 		sleep 1
+-		if [ -e dtrace.out ]; then
++		if [ -e dtrace.ready ]; then
+ 			break
+ 		fi
+@@ -137,6 +142,34 @@ for nusdt in "" "-xnusdtprobes=40" "-xnusdtprobes=39"; do
+ 			done
+ 		done
+ 
++		# For successful settings, wait until dtprobed has published all
++		# four providers before starting the observation interval.
++		if [[ $nusdt != "-xnusdtprobes=39" ]]; then
++			deadline=$((SECONDS + timeout / 2))
++			all_visible=0
++			while ((SECONDS < deadline)); do
++				list_args=()
++				for (( immbr = 0; immbr < nmmbrs; immbr++ )); do
++					list_args+=( -n "testprov${pids[$immbr]}:::" )
++				done
++				probe_list=$($dtrace $dt_flags -l "${list_args[@]}" 2>/dev/null || true)
++				all_visible=1
++				for (( immbr = 0; immbr < nmmbrs; immbr++ )); do
++					if ! grep -q "testprov${pids[$immbr]}" <<<"$probe_list"; then
++						all_visible=0
++						break
++					fi
++				done
++				((all_visible)) && break
++				sleep 1
++			done
++			if (( !all_visible )); then
++				echo "USDT providers did not become visible" >&2
++				exit 1
++			fi
++			sleep 1
++		fi
++
+ 		# Kill the team.
+ 		sleep 3
+ 		for (( immbr = 0; immbr < $nmmbrs; immbr++ )); do
+diff --git a/test/unittest/usdt/tst.dlclose4.sh b/test/unittest/usdt/tst.dlclose4.sh
+--- a/test/unittest/usdt/tst.dlclose4.sh
++++ b/test/unittest/usdt/tst.dlclose4.sh
+@@ -114,6 +114,11 @@ main(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
++	FILE *ready = fopen("main.ready", "w");
++	if (ready == NULL)
++		return 1;
++	fclose(ready);
++
+ 	/*
+ 	 * Listen for signals.
+ 	 */
+@@ -147,11 +152,14 @@ function check_USDT_probes() {
+ 	return $?
+ }
+ 
+-# Define a function that checks loading the library:
+-# send USR1 and wait up to 6 seconds for the USDT probe to appear.
++# Leave one fifth of the runner budget for each of the four transitions.
++probe_wait=$((timeout / 5))
++((probe_wait < 6)) && probe_wait=6
++
++# Send USR1 and wait for the USDT probe to appear.
+ 
+ function load_lib() {
+ 	kill -s USR1 $pid
+-	for iter in `seq 6`; do
++	for iter in `seq $probe_wait`; do
+ 		sleep 1
+ 		if check_USDT_probes; then
+@@ -172,5 +180,5 @@ function load_lib() {
+ function unload_lib() {
+ 	kill -s USR2 $pid  # send USR2 to unload library and USDT probe
+-	for iter in `seq 6`; do
++	for iter in `seq $probe_wait`; do
+ 		sleep 1
+ 		if ! check_USDT_probes; then
+@@ -192,6 +200,13 @@ function unload_lib() {
+ ./main &
+ pid=$!
+ disown %+
+-sleep 2
++for iter in `seq $probe_wait`; do
++	[[ -e main.ready ]] && break
++	sleep 1
++done
++if [[ ! -e main.ready ]]; then
++	echo main did not become ready >&2
++	exit 1
++fi
+ 
+ # Check.
+diff --git a/test/unittest/usdt/tst.lingering.sh b/test/unittest/usdt/tst.lingering.sh
+--- a/test/unittest/usdt/tst.lingering.sh
++++ b/test/unittest/usdt/tst.lingering.sh
+@@ -73,6 +73,21 @@ TRIGPID=$!
+ 
+ trap 'kill -9 $TRIGPID' ERR EXIT
+ 
++probe_wait=$((timeout / 6))
++((probe_wait < 5)) && probe_wait=5
++visible=0
++for iter in `seq $probe_wait`; do
++	if $dtrace $dt_flags -lP test_prov$TRIGPID >/dev/null 2>&1; then
++		visible=1
++		break
++	fi
++	sleep 1
++done
++if (( !visible )); then
++	echo "test_prov$TRIGPID did not become visible" >&2
++	exit 1
++fi
++
+ script() {
+ 	$dtrace $dt_flags -p $TRIGPID -qs /dev/stdin <<EOF
+ 	test_prov\$target:::$1
+@@ -81,7 +96,7 @@ script() {
+ 		exit(0);
+ 	}
+ 
+-	tick-5s
++	tick-${probe_wait}s
+ 	{
+ 		printf("probe $1 timed out\n");
+ 		exit(1);

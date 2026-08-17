@@ -1,0 +1,134 @@
+From: dtrace.nix maintainers
+Subject: libdtrace: make the tshark executable an explicit capability
+
+Nix packages cannot rely on an FHS PATH, but hard-coding tshark at both call
+sites also prevents callers and the upstream tests from deliberately disabling
+or replacing it.  Use the build-time path by default and retain an explicit
+DTRACE_TSHARK override.  An empty override disables tshark and selects the
+documented tracemem fallback.
+
+Check the executable without a shell so a path is never interpreted as shell
+input, and use the same selected executable for the real child.
+
+diff --git a/libdtrace/dt_pcap.c b/libdtrace/dt_pcap.c
+--- a/libdtrace/dt_pcap.c
++++ b/libdtrace/dt_pcap.c
+@@ -11,4 +11,5 @@
+ #include <grp.h>
++#include <limits.h>
+ #include <pcap.h>
+ #include <poll.h>
+ #include <port.h>
+@@ -21,5 +22,6 @@
+ #include <string.h>
+ #include <sys/sysinfo.h>
+ #include <sys/types.h>
++#include <sys/wait.h>
+ #include <time.h>
+ #include <unistd.h>
+@@ -132,6 +134,38 @@ dt_pcap_print(void *d)
+ 	return NULL;
+ }
+ 
++static int
++dt_pcap_has_tshark(const char *tshark)
++{
++	pid_t	pid;
++	int	fd;
++	int	status;
++	int	waited;
++
++	pid = fork();
++	if (pid < 0)
++		return 0;
++
++	if (pid == 0) {
++		fd = open("/dev/null", O_RDWR);
++		if (fd < 0)
++			_exit(127);
++		if (dup2(fd, STDOUT_FILENO) < 0 ||
++		    dup2(fd, STDERR_FILENO) < 0)
++			_exit(127);
++		if (fd > STDERR_FILENO)
++			close(fd);
++		execl(tshark, "tshark", "-v", NULL);
++		_exit(127);
++	}
++
++	do {
++		waited = waitpid(pid, &status, 0);
++	} while (waited < 0 && errno == EINTR);
++
++	return waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
++}
++
+ /*
+  * The file used to write packet capture data to is either specified via
+  * dt_freopen_filename (the result of calling freopen()); or the file is an
+@@ -148,7 +182,8 @@ dt_pcap_print(void *d)
+ const char *
+ dt_pcap_filename(dtrace_hdl_t *dtp, FILE *fp)
+ {
+-	int	status;
++	const char	*configured_tshark;
++	char		tshark[PATH_MAX];
+ 	pid_t	pid;
+ 	int	pipe_in[2];
+ 	int	pipe_out[2];
+@@ -179,10 +214,19 @@ dt_pcap_filename(dtrace_hdl_t *dtp, FILE *fp)
+ 	dtp->dt_pcap.dt_pcap_pid = -1;
+ 
+ 	/*
+-	 * First, is tshark available? Saves us making assumptions about path.
++	 * Use the explicitly configured executable.  An empty override asks for
++	 * the tracemem fallback, which is useful to callers that do not want to
++	 * execute a packet dissector.
+ 	 */
+-	status = system("tshark -v >/dev/null 2>&1");
+-	if (status < 0 || WEXITSTATUS(status) != 0)
++	configured_tshark = getenv("DTRACE_TSHARK");
++	if (configured_tshark == NULL)
++		configured_tshark = "@tshark@";
++	if (configured_tshark[0] == '\0' ||
++	    strlen(configured_tshark) >= sizeof(tshark))
++		return NULL;
++	strcpy(tshark, configured_tshark);
++
++	if (!dt_pcap_has_tshark(tshark))
+ 		return NULL;
+ 
+ 	if (pipe(pipe_in) < 0)
+@@ -304,7 +348,7 @@ dt_pcap_filename(dtrace_hdl_t *dtp, FILE *fp)
+ 		putenv("SHELL=/bin/sh");
+ 		putenv("USER=nobody");
+ 
+-		execlp("tshark", "tshark", "-l", "-i", "-", NULL);
++		execl(tshark, "tshark", "-l", "-i", "-", NULL);
+ 	nopriv_die:
+ 		fprintf(stderr, "Cannot drop privileges or exec tshark: %s\n",
+ 		    strerror(errno));
+diff --git a/test/unittest/pcap/tst.pcap.stdout.sh b/test/unittest/pcap/tst.pcap.stdout.sh
+--- a/test/unittest/pcap/tst.pcap.stdout.sh
++++ b/test/unittest/pcap/tst.pcap.stdout.sh
+@@ -24,9 +24,8 @@ pcapsize=16
+ 
+ file=$tmpdir/pcap.out.$$
+ 
+-# Eliminate /usr/sbin and /usr/bin from PATH so that we do not find tshark.
+-# We will fall back to tracemem()-like output.
+-PATH= $dtrace $dt_flags -x pcapsize=$pcapsize -w -c "$testdir/../ip/client.ip.pl tcp $local $tcpport" -qs /dev/stdin <<EODTRACE 1> $file
++# Explicitly disable tshark so that we fall back to tracemem()-like output.
++DTRACE_TSHARK= PATH= $dtrace $dt_flags -x pcapsize=$pcapsize -w -c "$testdir/../ip/client.ip.pl tcp $local $tcpport" -qs /dev/stdin <<EODTRACE 1> $file
+ 
+ ip:::send
+ /args[2]->ip_saddr == "$local" && args[2]->ip_daddr == "$local" /
+diff --git a/test/unittest/pcap/tst.pcap.stdout-fork-error.sh b/test/unittest/pcap/tst.pcap.stdout-fork-error.sh
+--- a/test/unittest/pcap/tst.pcap.stdout-fork-error.sh
++++ b/test/unittest/pcap/tst.pcap.stdout-fork-error.sh
+@@ -33,5 +33,5 @@ cat > $tmpdir/failshark/tshark <<'EOF'
+ chmod a+x $tmpdir/failshark/tshark
+-PATH=$tmpdir/failshark:$PATH $dtrace $dt_flags -x pcapsize=$pcapsize -w -c "$testdir/../ip/client.ip.pl tcp $local $tcpport" -qs /dev/stdin <<EODTRACE 1> $file
++DTRACE_TSHARK=$tmpdir/failshark/tshark $dtrace $dt_flags -x pcapsize=$pcapsize -w -c "$testdir/../ip/client.ip.pl tcp $local $tcpport" -qs /dev/stdin <<EODTRACE 1> $file
+ 
+ ip:::send
+ /args[2]->ip_saddr == "$local" && args[2]->ip_daddr == "$local" /

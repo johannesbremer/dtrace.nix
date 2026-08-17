@@ -19,7 +19,11 @@ in
   accelerated = common // {
     requiredFeatures.kvm = true;
     qemuAcceleration = true;
-    perTestTimeout = 41;
+    perTestTimeout = {
+      core = 41;
+      long = 120;
+      stress = 600;
+    };
     shardCounts = {
       core = 4;
       long = 2;
@@ -30,7 +34,11 @@ in
   emulated = common // {
     requiredFeatures.kvm = false;
     qemuAcceleration = false;
-    perTestTimeout = 120;
+    perTestTimeout = {
+      core = 300;
+      long = 600;
+      stress = 1200;
+    };
     shardCounts = {
       core = 16;
       long = 4;

@@ -1,0 +1,50 @@
+From: dtrace.nix maintainers
+Subject: bpf: bound memory while preparing wildcard probe programs
+
+Program construction is intentionally done before global maps are created so
+that code generation can discover strings, variables, and other map sizing
+requirements.  Keeping every constructed DIFO alive until the later load pass,
+however, makes memory proportional to the number of matched probes.  A wildcard
+FBT enabling on a generic x86_64 kernel can retain more than 150,000 programs
+and exhaust over 16 GiB before loading begins.
+
+Treat the existing phases as analysis and emission passes: construct and free
+each DIFO during analysis, then reconstruct, link, load, attach, and free one
+probe at a time during emission.  Compiler-wide metadata discovered in the
+first pass remains in the DTrace handle, while peak DIFO memory is bounded by a
+single probe program.  Preserve add_probe calls for providers without their own
+trampolines: USDT providers use that hook to populate runtime dispatch maps.
+
+diff --git a/libdtrace/dt_bpf.c b/libdtrace/dt_bpf.c
+--- a/libdtrace/dt_bpf.c
++++ b/libdtrace/dt_bpf.c
+@@ -1286,7 +1286,7 @@ dt_bpf_make_progs(dtrace_hdl_t *dtp, uint_t cflags)
+ 
+ 		DT_DISASM_PROG(dtp, cflags, dp, stderr, NULL, prp->desc);
+ 
+-		prp->difo = dp;
++		dt_difo_free(dtp, dp);
+ 	}
+ 
+ 	return 0;
+@@ -1340,11 +1340,18 @@ dt_bpf_load_progs(dtrace_hdl_t *dtp, uint_t cflags)
+ 		if (prp->prov->impl->add_probe)
+ 			prp->prov->impl->add_probe(dtp, prp);
+ 
+-		dp = prp->difo;
+-		if (dp == NULL)
++		if (prp == dtp->dt_error ||
++		    prp->prov->impl->prog_type == BPF_PROG_TYPE_UNSPEC)
+ 			continue;
+ 
++		dp = dt_construct(dtp, prp, cflags, NULL);
++		if (dp == NULL)
++			goto fail;
++		prp->difo = dp;
++
++		DT_DISASM_PROG(dtp, cflags, dp, stderr, NULL, prp->desc);
++
+ 		if (dt_link(dtp, prp, dp, NULL) == -1)
+ 			goto fail;
+ 
+ 		DT_DISASM_PROG_LINKED(dtp, cflags, dp, stderr, NULL, prp->desc);

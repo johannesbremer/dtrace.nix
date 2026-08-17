@@ -21,7 +21,7 @@ let
   swapSize = executionProfile.swapSize.${coverage};
   testEnvironment = pkgs.lib.concatStringsSep " " [
     "--setenv=DTRACE_TEST_COVERAGE=${coverage}"
-    "--setenv=DTRACE_TEST_TIMEOUT=${toString executionProfile.perTestTimeout}"
+    "--setenv=DTRACE_TEST_TIMEOUT=${toString executionProfile.perTestTimeout.${coverage}}"
     "--setenv=DTRACE_TEST_LONG_CUTOFF=${toString executionProfile.longTestCutoff}"
     "--setenv=DTRACE_TEST_SHARD_INDEX=${toString shardIndex}"
     "--setenv=DTRACE_TEST_SHARD_COUNT=${toString shardCount}"
